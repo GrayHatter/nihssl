@@ -34,7 +34,8 @@ const ContentType = enum(u8) {
 
 const TLSRecord = struct {
     type: ContentType,
-    version: ProtocolVersion = TLSv1_3,
+    //version: ProtocolVersion = TLSv1_2,
+    version: ProtocolVersion = .{ .major = 3, .minor = 3 },
     length: u16 = 0,
     fragment: union(enum) {
         client_handshake: ClientHandshake,
@@ -59,14 +60,19 @@ const TLSRecord = struct {
 };
 
 /// rfc5246
-pub const ClientHello = extern struct {
-    client_version: ProtocolVersion,
+pub const ClientHello = struct {
+    version: ProtocolVersion,
     random: Random,
     session_id: SessionID,
-    cipher_suite: CipherSuite,
+    ciphers: []const CipherSuite = &[0]CipherSuite{},
     compression: Compression,
-    extentions: struct {},
+    extensions: struct {},
 
+    pub const SupportedSuiteList: [3]CipherSuite = [_]CipherSuite{
+        CipherSuites.TLS_DH_DSS_WITH_AES_128_CBC_SHA256,
+        CipherSuites.TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+        CipherSuites.TLS_DH_RSA_WITH_AES_256_CBC_SHA256,
+    };
     pub const length = @sizeOf(ClientHello);
 
     pub const SessionID = [32]u8;
@@ -78,18 +84,21 @@ pub const ClientHello = extern struct {
         unix_time: u32,
         random_bytes: [28]u8,
     };
+    comptime {
+        std.debug.assert(@sizeOf(Random) == 32);
+    }
 
     pub fn init() ClientHello {
         var hello = ClientHello{
-            .client_version = TLSv1_3,
+            .version = .{ .major = 3, .minor = 3 },
             .random = .{
                 .unix_time = @truncate(@abs(std.time.timestamp())),
                 .random_bytes = undefined,
             },
-            .session_id = undefined,
-            .cipher_suite = .{ 0, 0 },
+            .session_id = [_]u8{0} ** 32,
+            .ciphers = &SupportedSuiteList,
             .compression = .null,
-            .extentions = .{},
+            .extensions = .{},
         };
 
         csprng.fill(&hello.random.random_bytes);
@@ -100,8 +109,37 @@ pub const ClientHello = extern struct {
     pub fn pack(ch: ClientHello, buffer: []u8) !usize {
         var fba = fixedBufferStream(buffer);
         var w = fba.writer().any();
-        try w.writeStruct(ch);
-        return @sizeOf(ClientHello);
+        try w.writeByte(ch.version.major);
+        try w.writeByte(ch.version.minor);
+        var len: usize = 2; // version
+        try w.writeStruct(ch.random);
+        len += 32; // random
+
+        try w.writeByte(32);
+        len += 1; // sessid count
+        try w.writeAll(&ch.session_id);
+        len += 32; // sessionid
+
+        const c_count: u16 = @truncate(ch.ciphers.len);
+        try w.writeInt(u16, c_count * 2, std.builtin.Endian.big);
+        len += 2;
+        for (ch.ciphers) |cipher| {
+            try w.writeByte(cipher[0]);
+            try w.writeByte(cipher[1]);
+            len += 2;
+        }
+        try w.writeByte(1);
+        try w.writeByte(@intFromEnum(ch.compression));
+        len += 2; // compression
+
+        try w.writeInt(u16, 0, std.builtin.Endian.big);
+        len += 2; // client extensions
+        const printable = buffer[0..len];
+        print("client hello full: {any}\n\n", .{printable});
+        print("client hello srand: {any}\n\n", .{printable[2..]});
+        print("client hello randonly: {any}\n\n", .{printable[2..][0..32]});
+        print("client hello postrand: {any}\n\n", .{printable[34..]});
+        return len;
     }
 };
 
@@ -245,7 +283,7 @@ fn Handshake(comptime msg_type: HandshakeType) type {
         pub fn pack(self: Self, buffer: []u8) !usize {
             var fba = fixedBufferStream(buffer);
             var w = fba.writer().any();
-            const len = try self.body.pack(buffer);
+            const len = try self.body.pack(buffer[4..]);
             std.debug.assert(len < std.math.maxInt(u24));
             try w.writeByte(@intFromEnum(msg_type));
             try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
@@ -296,13 +334,15 @@ fn tlsHandshake(conn: net.Stream) !void {
 
     const len = try record.pack(&buffer);
 
-    print("data out {}\n", .{try conn.write(buffer[0..len])});
+    print("data count {}\n", .{try conn.write(buffer[0..len])});
+    print("data out {any}\n", .{buffer[0..len]});
     var server_hello: [0xff]u8 = undefined;
     const s_hello_read = try conn.read(&server_hello);
     if (s_hello_read == 0) return error.InvalidSHello;
 
     print("server data: {any}\n", .{server_hello[0..s_hello_read]});
     //try conn.writeAll(&client_fin);
+    try std.testing.expect(s_hello_read > 7);
 }
 
 fn tls(conn: net.Stream) !void {
@@ -323,7 +363,7 @@ test "Handshake ClientHello" {
 
     const len = try record.pack(&buffer);
 
-    print("{any}", .{buffer[0..len]});
+    print("handshake test: {any}\n", .{buffer[0..len]});
 }
 
 test "tls" {
@@ -338,6 +378,9 @@ test "tls" {
 const CipherSuite = [2]u8;
 
 const CipherSuites = struct {
+    pub const TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B };
+    pub const TLS_DH_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x69 };
+    pub const TLS_DH_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3E };
     TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x0D },
     TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x10 },
     TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x13 },
@@ -350,14 +393,15 @@ const CipherSuites = struct {
     TLS_DH_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x37 },
     TLS_DHE_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x38 },
     TLS_DHE_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x39 },
-    TLS_DH_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3E },
+
     TLS_DH_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3F },
     TLS_DHE_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x40 },
     TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x67 },
     TLS_DH_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x68 },
     TLS_DH_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x69 },
     TLS_DHE_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6A },
-    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B },
+    //TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B },
+
     // The following cipher suites are used for completely anonymous
     // Diffie-Hellman communications in which neither party is
     // authenticated.  Note that this mode is vulnerable to man-in-the-
