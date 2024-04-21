@@ -5,8 +5,11 @@ const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
 
 const TESTING_IP = "127.0.0.1";
+const TESTING_PORT = 443;
 
 const Alert = @import("alert.zig");
+const Extensions = @import("extensions.zig");
+const Extension = Extensions.Extension;
 
 var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
 
@@ -30,24 +33,37 @@ const ContentType = enum(u8) {
     alert = 21,
     handshake = 22,
     application_data = 23,
+
+    pub fn fromByte(from: u8) !ContentType {
+        print("from {}\n", .{from});
+        return switch (from) {
+            20 => .change_cipher_spec,
+            21 => .alert,
+            22 => .handshake,
+            23 => .application_data,
+            else => error.UnknownContentType,
+        };
+    }
 };
 
 const TLSRecord = struct {
-    type: ContentType,
-    //version: ProtocolVersion = TLSv1_2,
-    version: ProtocolVersion = .{ .major = 3, .minor = 3 },
+    version: ProtocolVersion = TLSv1_2,
     length: u16 = 0,
-    fragment: union(enum) {
-        client_handshake: ClientHandshake,
+    kind: union(ContentType) {
+        change_cipher_spec: []const u8,
+        alert: Alert,
+        handshake: Handshake,
+        application_data: []const u8,
     },
 
     pub fn packFragment(record: TLSRecord, buffer: []u8) !usize {
         var fba = fixedBufferStream(buffer);
-        const len = switch (record.fragment) {
-            .client_handshake => |ch| try ch.pack(buffer[5..]),
+        const len = switch (record.kind) {
+            .handshake => |ch| try ch.pack(buffer[5..]),
+            else => unreachable,
         };
         var w = fba.writer().any();
-        try w.writeByte(@intFromEnum(record.type));
+        try w.writeByte(@intFromEnum(record.kind));
         try w.writeByte(record.version.major);
         try w.writeByte(record.version.minor);
         try w.writeInt(u16, @truncate(len), std.builtin.Endian.big);
@@ -57,21 +73,70 @@ const TLSRecord = struct {
     pub fn pack(record: TLSRecord, buffer: []u8) !usize {
         return record.packFragment(buffer);
     }
+
+    pub fn unpackFragment(buffer: []const u8, sess: SessionState) !TLSRecord {
+        var fba = fixedBufferStream(buffer);
+        var r = fba.reader().any();
+
+        const fragtype = try ContentType.fromByte(try r.readByte());
+
+        return .{
+            .version = .{
+                .major = try r.readByte(),
+                .minor = try r.readByte(),
+            },
+            .length = try r.readInt(u16, std.builtin.Endian.big),
+            .kind = switch (fragtype) {
+                .change_cipher_spec => .{ .change_cipher_spec = unreachable },
+                .alert => .{ .alert = try Alert.unpack(buffer[5..]) },
+                .handshake => .{ .handshake = try Handshake.unpack(buffer[5..], sess) },
+                .application_data => .{ .application_data = unreachable },
+            },
+        };
+    }
+    pub fn unpack(buffer: []const u8, sess: SessionState) !TLSRecord {
+        return try unpackFragment(buffer, sess);
+    }
 };
 
-/// rfc5246
 pub const ClientHello = struct {
     version: ProtocolVersion,
     random: Random,
     session_id: SessionID,
     ciphers: []const CipherSuite = &[0]CipherSuite{},
     compression: Compression,
-    extensions: struct {},
+    extensions: []const Extension = &[0]Extension{},
 
-    pub const SupportedSuiteList: [3]CipherSuite = [_]CipherSuite{
+    pub const SupportedExtensions = [_]type{
+        Extensions.SupportedGroups,
+        Extensions.SignatureAlgorithms,
+    };
+
+    pub const SupportedSuiteList = [_]CipherSuite{
         CipherSuites.TLS_DH_DSS_WITH_AES_128_CBC_SHA256,
         CipherSuites.TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
         CipherSuites.TLS_DH_RSA_WITH_AES_256_CBC_SHA256,
+        CipherSuites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        CipherSuites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+
+        CipherSuites.TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA,
+        CipherSuites.TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA,
+        CipherSuites.TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA,
+        CipherSuites.TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
+        CipherSuites.TLS_DH_DSS_WITH_AES_128_CBC_SHA,
+        CipherSuites.TLS_DH_RSA_WITH_AES_128_CBC_SHA,
+        CipherSuites.TLS_DHE_DSS_WITH_AES_128_CBC_SHA,
+        CipherSuites.TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+        CipherSuites.TLS_DH_DSS_WITH_AES_256_CBC_SHA,
+        CipherSuites.TLS_DH_RSA_WITH_AES_256_CBC_SHA,
+        CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA,
+        CipherSuites.TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+        CipherSuites.TLS_DH_RSA_WITH_AES_128_CBC_SHA256,
+        CipherSuites.TLS_DHE_DSS_WITH_AES_128_CBC_SHA256,
+        CipherSuites.TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+        CipherSuites.TLS_DH_DSS_WITH_AES_256_CBC_SHA256,
+        CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
     };
     pub const length = @sizeOf(ClientHello);
 
@@ -98,7 +163,6 @@ pub const ClientHello = struct {
             .session_id = [_]u8{0} ** 32,
             .ciphers = &SupportedSuiteList,
             .compression = .null,
-            .extensions = .{},
         };
 
         csprng.fill(&hello.random.random_bytes);
@@ -111,35 +175,36 @@ pub const ClientHello = struct {
         var w = fba.writer().any();
         try w.writeByte(ch.version.major);
         try w.writeByte(ch.version.minor);
-        var len: usize = 2; // version
         try w.writeStruct(ch.random);
-        len += 32; // random
-
-        try w.writeByte(32);
-        len += 1; // sessid count
-        try w.writeAll(&ch.session_id);
-        len += 32; // sessionid
+        try w.writeByte(0);
+        //try w.writeByte(ch.session_id.len);
+        //try w.writeAll(&ch.session_id);
 
         const c_count: u16 = @truncate(ch.ciphers.len);
         try w.writeInt(u16, c_count * 2, std.builtin.Endian.big);
-        len += 2;
         for (ch.ciphers) |cipher| {
             try w.writeByte(cipher[0]);
             try w.writeByte(cipher[1]);
-            len += 2;
         }
         try w.writeByte(1);
         try w.writeByte(@intFromEnum(ch.compression));
-        len += 2; // compression
 
-        try w.writeInt(u16, 0, std.builtin.Endian.big);
-        len += 2; // client extensions
-        const printable = buffer[0..len];
-        print("client hello full: {any}\n\n", .{printable});
-        print("client hello srand: {any}\n\n", .{printable[2..]});
-        print("client hello randonly: {any}\n\n", .{printable[2..][0..32]});
-        print("client hello postrand: {any}\n\n", .{printable[34..]});
-        return len;
+        var e_count: u16 = 0;
+        var extension_buffer: [0x1000]u8 = undefined;
+        inline for (SupportedExtensions) |extension| {
+            var extt = extension{};
+            var ext = extt.extension();
+            e_count += @truncate(ext.pack(extension_buffer[e_count..]));
+        }
+        try w.writeInt(u16, e_count, std.builtin.Endian.big);
+        try w.writeAll(extension_buffer[0..e_count]);
+
+        return fba.pos;
+    }
+
+    pub fn unpack(buffer: []const u8, _: SessionState) !ClientHello {
+        _ = buffer;
+        unreachable;
     }
 };
 
@@ -151,7 +216,7 @@ const BulkCipherAlgorithm = struct {};
 const MACAlgorithm = struct {};
 const CompressionMethod = struct {};
 
-const SecurityParameters = struct {
+const SessionState = struct {
     entity: ConnectionEnd,
     prf_algorithm: PRFAlgorithm,
     bulk_cipher_algorithm: BulkCipherAlgorithm,
@@ -186,7 +251,7 @@ const SecurityParameters = struct {
 const TLSPlaintext = struct {
     pub fn init(frag: anytype) TLSPlaintext {
         switch (@TypeOf(frag)) {
-            ClientHandshake => {
+            ClientHello => {
                 return .{
                     .type = .handshake,
                     .length = @TypeOf(frag).length,
@@ -251,9 +316,47 @@ const HandshakeType = enum(u8) {
     certificate_verify = 15,
     client_key_exchange = 16,
     finished = 20,
+
+    pub fn fromByte(kind: u8) !HandshakeType {
+        return switch (kind) {
+            0 => .hello_request,
+            1 => .client_hello,
+            2 => .server_hello,
+            11 => .certificate,
+            12 => .server_key_exchange,
+            13 => .certificate_request,
+            14 => .server_hello_done,
+            15 => .certificate_verify,
+            16 => .client_key_exchange,
+            20 => .finished,
+            else => unreachable,
+        };
+    }
+
+    pub fn toType(kind: HandshakeType) type {
+        return switch (kind) {
+            inline .hello_request => unreachable,
+            inline .client_hello => ClientHello,
+            inline .server_hello => ServerHello,
+
+            .certificate,
+            .server_key_exchange,
+            .certificate_request,
+            .server_hello_done,
+            .certificate_verify,
+            .client_key_exchange,
+            .finished,
+            => unreachable,
+            else => return error.UnknownHandshakeType,
+        };
+    }
 };
 
-const ServerHello = struct {};
+const ServerHello = struct {
+    pub fn unpack(_: []const u8, _: SessionState) !ServerHello {
+        unreachable;
+    }
+};
 const Certificate = struct {};
 const ServerKeyExchange = struct {};
 const CertificateRequest = struct {};
@@ -262,37 +365,80 @@ const CertificateVerify = struct {};
 const ClientKeyExchange = struct {};
 const Finished = struct {};
 
-fn Handshake(comptime msg_type: HandshakeType) type {
-    return struct {
-        const Self = @This();
-        msg_type: HandshakeType = msg_type,
-        _length: u24 = 0, // unused
-        body: switch (msg_type) {
-            .hello_request => HelloRequest,
-            .client_hello => ClientHello,
-            .server_hello => ServerHello,
-            .certificate => Certificate,
-            .server_key_exchange => ServerKeyExchange,
-            .certificate_request => CertificateRequest,
-            .server_hello_done => ServerHelloDone,
-            .certificate_verify => CertificateVerify,
-            .client_key_exchange => ClientKeyExchange,
-            .finished => Finished,
-        },
-
-        pub fn pack(self: Self, buffer: []u8) !usize {
-            var fba = fixedBufferStream(buffer);
-            var w = fba.writer().any();
-            const len = try self.body.pack(buffer[4..]);
-            std.debug.assert(len < std.math.maxInt(u24));
-            try w.writeByte(@intFromEnum(msg_type));
-            try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
-            return len + 4;
-        }
-    };
+fn handshakeFromHeader(kind: HandshakeType) type {
+    return Handshake(kind);
 }
 
-const ClientHandshake = Handshake(.client_hello);
+const Handshakes = union(HandshakeType) {
+    hello_request: void,
+    client_hello: ClientHello,
+    server_hello: ServerHello,
+    certificate: void,
+    server_key_exchange: void,
+    certificate_request: void,
+    server_hello_done: void,
+    certificate_verify: void,
+    client_key_exchange: void,
+    finished: void,
+};
+
+//    {
+//            .hello_request => HelloRequest,
+//            .client_hello => ClientHello,
+//            .server_hello => ServerHello,
+//            .certificate => Certificate,
+//            .server_key_exchange => ServerKeyExchange,
+//            .certificate_request => CertificateRequest,
+//            .server_hello_done => ServerHelloDone,
+//            .certificate_verify => CertificateVerify,
+//            .client_key_exchange => ClientKeyExchange,
+//            .finished => Finished,
+//        },
+
+const Handshake = struct {
+    msg_type: HandshakeType,
+    _length: u24 = 0, // unused
+    body: Handshakes,
+
+    pub fn wrap(any: anytype) !Handshake {
+        const kind = @TypeOf(any);
+        switch (kind) {
+            ClientHello => {
+                return .{
+                    .msg_type = .client_hello,
+                    .body = .{ .client_hello = any },
+                };
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn pack(hs: Handshake, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        var w = fba.writer().any();
+        const len = switch (hs.body) {
+            .client_hello => |ch| try ch.pack(buffer[4..]),
+            else => unreachable,
+        };
+        std.debug.assert(len < std.math.maxInt(u24));
+
+        try w.writeByte(@intFromEnum(hs.msg_type));
+        try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
+        return len + 4;
+    }
+
+    pub fn unpack(buffer: []const u8, sess: SessionState) !Handshake {
+        const hs_type = try HandshakeType.fromByte(buffer[0]);
+        return .{
+            .msg_type = hs_type,
+            .body = switch (hs_type) {
+                .client_hello => .{ .client_hello = try ClientHello.unpack(buffer[4..], sess) },
+                .server_hello => .{ .server_hello = try ServerHello.unpack(buffer[4..], sess) },
+                else => unreachable,
+            },
+        };
+    }
+};
 
 const HashAlgorithm = enum(u8) {
     none = 0,
@@ -317,30 +463,42 @@ const SignatureAndHashAlgorithm = struct {
     signature: SignatureAlgorithm,
 };
 
-// SignatureAndHashAlgorithm
-// supported_signature_algorithms<2..2^16-2>;
-
 fn tlsHandshake(conn: net.Stream) !void {
     var buffer = [_]u8{0} ** 0x400;
-    const client_handshake = ClientHandshake{
-        .body = ClientHello.init(),
-    };
+    const client_handshake = ClientHello.init();
     const record = TLSRecord{
-        .type = .handshake,
-        .fragment = .{
-            .client_handshake = client_handshake,
+        .kind = .{
+            .handshake = try Handshake.wrap(client_handshake),
         },
     };
 
     const len = try record.pack(&buffer);
+    const dout = try conn.write(buffer[0..len]);
+    _ = dout;
 
-    print("data count {}\n", .{try conn.write(buffer[0..len])});
-    print("data out {any}\n", .{buffer[0..len]});
+    //print("data count {}\n", .{dout});
+    if (true) print("data out {any}\n", .{buffer[0..len]});
     var server_hello: [0xff]u8 = undefined;
     const s_hello_read = try conn.read(&server_hello);
     if (s_hello_read == 0) return error.InvalidSHello;
 
-    print("server data: {any}\n", .{server_hello[0..s_hello_read]});
+    const server_msg = server_hello[0..s_hello_read];
+
+    const session: SessionState = undefined;
+
+    print("server data: {any}\n", .{server_msg});
+    const tlsr = try TLSRecord.unpack(server_msg, session);
+
+    switch (tlsr.kind) {
+        .alert => |a| {
+            try std.testing.expect(a.description != .decode_error);
+            print("ALERT {}\n", .{a});
+        },
+        else => |na| print("non alert message {}\n", .{na}),
+    }
+
+    print("server data: {any}\n", .{tlsr});
+
     //try conn.writeAll(&client_fin);
     try std.testing.expect(s_hello_read > 7);
 }
@@ -351,23 +509,19 @@ fn tls(conn: net.Stream) !void {
 
 test "Handshake ClientHello" {
     var buffer = [_]u8{0} ** 0x400;
-    const client_handshake = ClientHandshake{
-        .body = ClientHello.init(),
-    };
+    const client_hello = ClientHello.init();
     const record = TLSRecord{
-        .type = .handshake,
-        .fragment = .{
-            .client_handshake = client_handshake,
+        .kind = .{
+            .handshake = try Handshake.wrap(client_hello),
         },
     };
 
     const len = try record.pack(&buffer);
-
-    print("handshake test: {any}\n", .{buffer[0..len]});
+    _ = len;
 }
 
 test "tls" {
-    const addr = net.Address.resolveIp(TESTING_IP, 443) catch |err| {
+    const addr = net.Address.resolveIp(TESTING_IP, TESTING_PORT) catch |err| {
         print("unable to resolve address because {}\n", .{err});
         return err;
     };
@@ -381,25 +535,39 @@ const CipherSuites = struct {
     pub const TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B };
     pub const TLS_DH_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x69 };
     pub const TLS_DH_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3E };
-    TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x0D },
-    TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x10 },
-    TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x13 },
-    TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x16 },
-    TLS_DH_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x30 },
-    TLS_DH_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x31 },
-    TLS_DHE_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x32 },
-    TLS_DHE_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x33 },
-    TLS_DH_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x36 },
-    TLS_DH_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x37 },
-    TLS_DHE_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x38 },
-    TLS_DHE_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x39 },
 
-    TLS_DH_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3F },
-    TLS_DHE_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x40 },
-    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x67 },
-    TLS_DH_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x68 },
-    TLS_DH_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x69 },
-    TLS_DHE_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6A },
+    pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA8 };
+    pub const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA9 };
+    pub const TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAA };
+
+    pub const TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x0D };
+    pub const TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x10 };
+    pub const TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x13 };
+    pub const TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x16 };
+    pub const TLS_DH_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x30 };
+    pub const TLS_DH_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x31 };
+    pub const TLS_DHE_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x32 };
+    pub const TLS_DHE_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x33 };
+    pub const TLS_DH_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x36 };
+    pub const TLS_DH_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x37 };
+    pub const TLS_DHE_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x38 };
+    pub const TLS_DHE_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x39 };
+
+    pub const TLS_DH_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3F };
+    pub const TLS_DHE_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x40 };
+    pub const TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x67 };
+    pub const TLS_DH_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x68 };
+    pub const TLS_DHE_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6A };
+    // RFC7905
+    //TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA8 },
+    //TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA9 },
+    //TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAA },
+
+    // RFC5246
+    TLS_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAB },
+    TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAC },
+    TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAD },
+    TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAE },
     //TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B },
 
     // The following cipher suites are used for completely anonymous
