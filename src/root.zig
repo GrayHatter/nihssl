@@ -5,7 +5,7 @@ const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
 
 const TESTING_IP = "127.0.0.1";
-const TESTING_PORT = 443;
+const TESTING_PORT = 4433;
 
 const Alert = @import("alert.zig");
 const Extensions = @import("extensions.zig");
@@ -219,9 +219,57 @@ const ConnectionEnd = struct {};
 const PRFAlgorithm = struct {};
 const BulkCipherAlgorithm = struct {};
 const MACAlgorithm = struct {};
-const CompressionMethod = struct {};
+const CompressionMethod = ?void;
+
+const EllipticCurveCipher = struct {
+    curve: union(CurveType) {
+        invalid: void,
+        explicit_prime: ExplicitPrime,
+        explicit_char2: ExplicitChar2,
+        named_curve: NamedCurve,
+    } = .{ .invalid = {} },
+
+    pub const CurveType = enum(u8) {
+        invalid = 0,
+        explicit_prime = 1,
+        explicit_char2 = 2,
+        named_curve = 3,
+
+        pub fn fromByte(t: u8) !CurveType {
+            return switch (t) {
+                inline 0...3 => |i| @enumFromInt(i),
+                else => return error.InvalidECCCurveType,
+            };
+        }
+    };
+
+    pub const ExplicitPrime = struct {};
+    pub const ExplicitChar2 = struct {};
+    pub const NamedCurve = struct {};
+
+    pub fn unpackKeyExchange(buffer: []const u8) !EllipticCurveCipher {
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
+
+        const curve_type = try CurveType.fromByte(try r.readByte());
+        return .{
+            .curve = switch (curve_type) {
+                .named_curve => .{ .named_curve = .{} },
+                else => return error.UnsupportedCurve,
+            },
+        };
+    }
+};
+
+const Cipher = struct {
+    suite: union(enum) {
+        invalid: void,
+        ecc: EllipticCurveCipher,
+    } = .{ .invalid = {} },
+};
 
 const SessionState = struct {
+    cipher: Cipher = .{},
     entity: ConnectionEnd = .{},
     prf_algorithm: PRFAlgorithm = .{},
     bulk_cipher_algorithm: BulkCipherAlgorithm = .{},
@@ -233,7 +281,8 @@ const SessionState = struct {
     mac_algorithm: MACAlgorithm = .{},
     mac_length: u8 = 0,
     mac_key_length: u8 = 0,
-    compression_algorithm: CompressionMethod = .{},
+    /// Compressed encryption is a mistake...
+    compression_algorithm: CompressionMethod = null,
     master_secret: [48]u8 = std.mem.zeroes([48]u8),
     client_random: [32]u8 = std.mem.zeroes([32]u8),
     server_random: [32]u8 = std.mem.zeroes([32]u8),
@@ -329,7 +378,7 @@ const ServerHello = struct {
     version: ProtocolVersion,
     random: Random,
     session_id: SessionID,
-    ciphers: [1]CipherSuite,
+    cipher: CipherSuite,
     compression: Compression,
     extensions: []const Extension,
 
@@ -353,10 +402,11 @@ const ServerHello = struct {
 
         // cipers
         //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
-        const cipher: [1][2]u8 = [1][2]u8{.{
+        const cipher: [2]u8 = [2]u8{
             try r.readByte(),
             try r.readByte(),
-        }};
+        };
+        print("requested cipher {any}\n", .{cipher});
 
         // compression
         if (try r.readByte() != 0) return error.InvalidCompression;
@@ -374,7 +424,7 @@ const ServerHello = struct {
             .version = version,
             .random = random,
             .session_id = session_id,
-            .ciphers = cipher,
+            .cipher = cipher,
             .compression = .null,
             .extensions = &[0]Extension{},
         };
@@ -395,12 +445,19 @@ const Certificate = struct {
 
 const ServerKeyExchange = struct {
     buffer: []const u8,
-    session: *SessionState,
+    cipher: *const Cipher,
 
+    /// Will modify sess with supplied
     pub fn unpack(buffer: []const u8, sess: *SessionState) !ServerKeyExchange {
+        switch (sess.cipher.suite) {
+            .ecc => {
+                sess.cipher.suite.ecc = try EllipticCurveCipher.unpackKeyExchange(buffer);
+            },
+            else => unreachable,
+        }
         return .{
             .buffer = buffer,
-            .session = sess,
+            .cipher = &sess.cipher,
         };
     }
 };
@@ -430,7 +487,43 @@ const ServerHelloDone = struct {
 };
 
 const CertificateVerify = struct {};
-const ClientKeyExchange = struct {};
+
+const ClientECDH = struct {
+    _key_material: [255]u8 = [_]u8{8} ** 255,
+    // 1..255
+    point: []u8 = &[0]u8{},
+};
+
+const ClientKeyExchange = struct {
+    /// RFC 4492
+    pve: enum(u8) {
+        /// Provided in the client cert
+        implicit = 0,
+        /// specified next
+        explicit = 1,
+    } = .explicit,
+    key_exchange_algo: ClientECDH = .{},
+    key_material: ?std.crypto.dh.X25519.KeyPair = null,
+
+    pub fn init() !ClientKeyExchange {
+        var cke = ClientKeyExchange{
+            .key_exchange_algo = .{},
+        };
+        cke.key_material = try std.crypto.dh.X25519.KeyPair.create(null);
+        cke.key_exchange_algo.point = &cke.key_material.?.public_key;
+        return cke;
+    }
+
+    pub fn pack(cke: ClientKeyExchange, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        var w = fba.writer().any();
+        try w.writeByte(@intFromEnum(cke.pve));
+        try w.writeByte(@truncate(cke.key_exchange_algo.point.len));
+        try w.writeAll(cke.key_exchange_algo.point);
+        return 1 + 1 + cke.key_exchange_algo.point.len;
+    }
+};
+
 const Finished = struct {};
 
 fn handshakeFromHeader(kind: HandshakeType) type {
@@ -446,7 +539,7 @@ const Handshakes = union(HandshakeType) {
     certificate_request: CertificateRequest,
     server_hello_done: ServerHelloDone,
     certificate_verify: void,
-    client_key_exchange: void,
+    client_key_exchange: ClientKeyExchange,
     finished: void,
 };
 
@@ -457,15 +550,17 @@ const Handshake = struct {
 
     pub fn wrap(any: anytype) !Handshake {
         const kind = @TypeOf(any);
-        switch (kind) {
-            ClientHello => {
-                return .{
-                    .msg_type = .client_hello,
-                    .body = .{ .client_hello = any },
-                };
+        return switch (kind) {
+            ClientHello => .{
+                .msg_type = .client_hello,
+                .body = .{ .client_hello = any },
             },
-            else => unreachable,
-        }
+            ClientKeyExchange => .{
+                .msg_type = .client_key_exchange,
+                .body = .{ .client_key_exchange = any },
+            },
+            else => comptime unreachable,
+        };
     }
 
     pub fn pack(hs: Handshake, buffer: []u8) !usize {
@@ -473,6 +568,7 @@ const Handshake = struct {
         var w = fba.writer().any();
         const len = switch (hs.body) {
             .client_hello => |ch| try ch.pack(buffer[4..]),
+            .client_key_exchange => |cke| try cke.pack(buffer[4..]),
             else => unreachable,
         };
         std.debug.assert(len < std.math.maxInt(u24));
@@ -580,6 +676,19 @@ test "tls" {
 
     //try conn.writeAll(&client_fin);
     try std.testing.expect(s_hello_read > 7);
+
+    const cke = try ClientKeyExchange.init();
+    const cke_record = TLSRecord{
+        .kind = .{
+            .handshake = try Handshake.wrap(cke),
+        },
+    };
+
+    const cke_len = try cke_record.pack(&buffer);
+    try std.testing.expectEqual(43, cke_len);
+    print("CKE: {any}\n", .{buffer[0..43]});
+    const ckeout = try conn.write(buffer[0..cke_len]);
+    if (true) print("cke delivered, {}\n", .{ckeout});
 }
 
 test "mock server response" {
@@ -644,9 +753,9 @@ test "mock server response" {
             139, 47, 181, 191, 223, 154, 13, 62, 100, 0,
             83, 84, 100, 92, 116, 99, 214, 144, 164, 102,
             191, 190, 74, 81, 133, 80, 68, 166, 135, 147,
-            190, 189, 222, 192, 200, 113, 
+            190, 189, 222, 192, 200, 113,
         22, 3, 3, 0, 146,
-        12, 0, 0, 142, 
+        12, 0, 0, 142,
             3, 0, 29, 32, 79, 189, 85, 166,
             190, 168, 238, 144, 215, 56, 187, 13, 64, 120,
             156, 134, 33, 146, 225, 213, 111, 241, 251, 212,
@@ -685,7 +794,7 @@ test "mock server response" {
 
     while (next_block.len > 0) {
         const tlsr = try TLSRecord.unpack(next_block, &session);
-        print("mock {}\n", .{tlsr.length});
+        if (false) print("mock {}\n", .{tlsr.length});
         next_block = next_block[tlsr.length + 5 ..];
 
         switch (tlsr.kind) {
@@ -694,6 +803,15 @@ test "mock server response" {
                 switch (hs.body) {
                     .server_hello => |hello| {
                         print("server hello {}\n", .{@TypeOf(hello)});
+                        if (std.mem.eql(
+                            u8,
+                            &hello.cipher,
+                            &CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+                        )) {
+                            session.cipher.suite = .{ .ecc = .{} };
+                        } else {
+                            return error.UnexpectedCipherSuite;
+                        }
                     },
                     .certificate => |cert| {
                         print("server cert {}\n", .{@TypeOf(cert)});
@@ -712,6 +830,18 @@ test "mock server response" {
             },
         }
     }
+
+    const cke = try ClientKeyExchange.init();
+    const record = TLSRecord{
+        .kind = .{
+            .handshake = try Handshake.wrap(cke),
+        },
+    };
+
+    var buffer = [_]u8{0} ** 0x1000;
+    const len = try record.pack(&buffer);
+    try std.testing.expectEqual(43, len);
+    print("CKE: {any}\n", .{buffer[0..43]});
 }
 
 const CipherSuite = [2]u8;
