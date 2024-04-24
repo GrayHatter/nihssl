@@ -317,7 +317,6 @@ const SessionState = struct {
     server_random: [32]u8 = std.mem.zeroes([32]u8),
 };
 
-//
 //   Implementations MUST NOT send zero-length fragments of Handshake,
 //   Alert, or ChangeCipherSpec content types.  Zero-length fragments of
 //   Application data MAY be sent as they are potentially useful as a
