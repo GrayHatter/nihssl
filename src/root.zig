@@ -10,23 +10,9 @@ const TESTING_PORT = 4433;
 const Alert = @import("alert.zig");
 const Extensions = @import("extensions.zig");
 const Extension = Extensions.Extension;
+const Protocol = @import("protocol.zig");
 
 var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
-
-pub const ProtocolVersion = extern struct {
-    major: u8,
-    minor: u8,
-};
-
-const TLSv1_2: ProtocolVersion = .{
-    .major = 3,
-    .minor = 3,
-};
-
-const TLSv1_3: ProtocolVersion = .{
-    .major = 3,
-    .minor = 4,
-};
 
 const ContentType = enum(u8) {
     change_cipher_spec = 20,
@@ -46,7 +32,7 @@ const ContentType = enum(u8) {
 };
 
 const TLSRecord = struct {
-    version: ProtocolVersion = TLSv1_2,
+    version: Protocol.Version = Protocol.TLSv1_2,
     length: u16 = 0,
     kind: union(ContentType) {
         change_cipher_spec: []const u8,
@@ -78,7 +64,7 @@ const TLSRecord = struct {
         var r = fba.reader().any();
 
         const fragtype = try ContentType.fromByte(try r.readByte());
-        const version = ProtocolVersion{
+        const version = Protocol.Version{
             .major = try r.readByte(),
             .minor = try r.readByte(),
         };
@@ -119,7 +105,7 @@ pub const Compression = enum(u8) {
 };
 
 pub const ClientHello = struct {
-    version: ProtocolVersion,
+    version: Protocol.Version,
     random: Random,
     session_id: SessionID,
     ciphers: []const CipherSuite = &[0]CipherSuite{},
@@ -403,7 +389,7 @@ const HandshakeType = enum(u8) {
 };
 
 const ServerHello = struct {
-    version: ProtocolVersion,
+    version: Protocol.Version,
     random: Random,
     session_id: SessionID,
     cipher: CipherSuite,
@@ -414,7 +400,7 @@ const ServerHello = struct {
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
 
-        const version = ProtocolVersion{
+        const version = Protocol.Version{
             .major = try r.readByte(),
             .minor = try r.readByte(),
         };
