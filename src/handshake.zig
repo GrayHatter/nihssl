@@ -130,6 +130,152 @@ pub const ClientHello = struct {
     }
 };
 
+pub const ClientKeyExchange = struct {
+    /// RFC 4492
+    pve: enum(u8) {
+        /// Provided in the client cert
+        implicit = 0,
+        /// specified next
+        explicit = 1,
+    } = .explicit,
+    cipher: *const root.Cipher,
+
+    pub fn init() !ClientKeyExchange {
+        const cke = ClientKeyExchange{
+            .cipher = &.{
+                .suite = .{ .ecc = root.EllipticCurveCipher{
+                    .curve = .{ .named_curve = .{} },
+                } },
+            },
+        };
+        return cke;
+    }
+
+    pub fn pack(cke: ClientKeyExchange, buffer: []u8) !usize {
+        return switch (cke.cipher.suite) {
+            .ecc => |ecc| ecc.packKeyExchange(buffer),
+            else => return error.NotImplemented,
+        };
+    }
+};
+
+/// Server Section
+pub const ServerHello = struct {
+    version: Protocol.Version,
+    random: Random,
+    session_id: SessionID,
+    cipher: CipherSuite,
+    compression: Compression,
+    extensions: []const Extension,
+
+    pub fn unpack(buffer: []const u8, _: *State) !ServerHello {
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
+
+        const version = Protocol.Version{
+            .major = try r.readByte(),
+            .minor = try r.readByte(),
+        };
+        var random = Random{
+            .random_bytes = undefined,
+        };
+        try r.readNoEof(&random.random_bytes);
+
+        const session_size = try r.readByte();
+        var session_id: [32]u8 = [_]u8{0} ** 32;
+        try r.readNoEof(session_id[0..session_size]);
+
+        // cipers
+        //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
+        const cipher: [2]u8 = [2]u8{
+            try r.readByte(),
+            try r.readByte(),
+        };
+
+        // compression
+        if (try r.readByte() != 0) return error.InvalidCompression;
+
+        // extensions
+        if (r.readInt(u16, std.builtin.Endian.big)) |extbytes| {
+            var extbuffer: [0x1000]u8 = undefined;
+            try r.readNoEof(extbuffer[0..extbytes]);
+        } else |err| switch (err) {
+            error.EndOfStream => std.debug.print("server hello readerror {}\n", .{err}),
+            else => return err,
+        }
+
+        return .{
+            .version = version,
+            .random = random,
+            .session_id = session_id,
+            .cipher = cipher,
+            .compression = .null,
+            .extensions = &[0]Extension{},
+        };
+    }
+};
+
+pub const ServerKeyExchange = struct {
+    buffer: []const u8,
+    cipher: *const root.Cipher,
+
+    pub fn pack(_: ServerKeyExchange, _: []u8) !usize {
+        return 0;
+    }
+
+    /// Will modify sess with supplied
+    pub fn unpack(buffer: []const u8, sess: *State) !ServerKeyExchange {
+        switch (sess.cipher.suite) {
+            .ecc => {
+                sess.cipher.suite.ecc = try root.EllipticCurveCipher.unpackKeyExchange(buffer);
+            },
+            else => unreachable,
+        }
+        return .{
+            .buffer = buffer,
+            .cipher = &sess.cipher,
+        };
+    }
+};
+
+pub const ServerHelloDone = struct {
+    buffer: []const u8,
+    session: *State,
+
+    pub fn unpack(buffer: []const u8, sess: *State) !ServerHelloDone {
+        return .{
+            .buffer = buffer,
+            .session = sess,
+        };
+    }
+};
+
+/// Certs
+pub const Certificate = struct {
+    buffer: []const u8,
+    session: *State,
+
+    pub fn unpack(buffer: []const u8, sess: *State) !Certificate {
+        return .{
+            .buffer = buffer,
+            .session = sess,
+        };
+    }
+};
+pub const CertificateRequest = struct {
+    buffer: []const u8,
+    session: *State,
+
+    pub fn unpack(buffer: []const u8, sess: *State) !CertificateRequest {
+        return .{
+            .buffer = buffer,
+            .session = sess,
+        };
+    }
+};
+
+const CertificateVerify = struct {};
+
 /// Combined Section
 pub const Type = enum(u8) {
     hello_request = 0,
@@ -163,11 +309,11 @@ pub const Type = enum(u8) {
         return switch (kind) {
             inline .hello_request => unreachable,
             inline .client_hello => ClientHello,
-            inline .server_hello => root.ServerHello,
-            inline .certificate => root.Certificate,
-            inline .server_key_exchange => root.ServerKeyExchange,
-            inline .certificate_request => root.CertificateRequest,
-            inline .server_hello_done => root.ServerHelloDone,
+            inline .server_hello => ServerHello,
+            inline .certificate => Certificate,
+            inline .server_key_exchange => ServerKeyExchange,
+            inline .certificate_request => CertificateRequest,
+            inline .server_hello_done => ServerHelloDone,
 
             .certificate_verify,
             .client_key_exchange,
@@ -185,13 +331,13 @@ fn handshakeFromHeader(kind: Type) type {
 const Handshakes = union(Type) {
     hello_request: void,
     client_hello: ClientHello,
-    server_hello: root.ServerHello,
-    certificate: root.Certificate,
-    server_key_exchange: root.ServerKeyExchange,
-    certificate_request: root.CertificateRequest,
-    server_hello_done: root.ServerHelloDone,
+    server_hello: ServerHello,
+    certificate: Certificate,
+    server_key_exchange: ServerKeyExchange,
+    certificate_request: CertificateRequest,
+    server_hello_done: ServerHelloDone,
     certificate_verify: void,
-    client_key_exchange: root.ClientKeyExchange,
+    client_key_exchange: ClientKeyExchange,
     finished: void,
 };
 
@@ -207,7 +353,7 @@ pub const Handshake = struct {
                 .msg_type = .client_hello,
                 .body = .{ .client_hello = any },
             },
-            root.ClientKeyExchange => .{
+            ClientKeyExchange => .{
                 .msg_type = .client_key_exchange,
                 .body = .{ .client_key_exchange = any },
             },
@@ -237,11 +383,11 @@ pub const Handshake = struct {
             .msg_type = hs_type,
             .body = switch (hs_type) {
                 .client_hello => .{ .client_hello = try ClientHello.unpack(hsbuf, sess) },
-                .server_hello => .{ .server_hello = try root.ServerHello.unpack(hsbuf, sess) },
-                .certificate => .{ .certificate = try root.Certificate.unpack(hsbuf, sess) },
-                .server_key_exchange => .{ .server_key_exchange = try root.ServerKeyExchange.unpack(hsbuf, sess) },
-                .certificate_request => .{ .certificate_request = try root.CertificateRequest.unpack(hsbuf, sess) },
-                .server_hello_done => .{ .server_hello_done = try root.ServerHelloDone.unpack(hsbuf, sess) },
+                .server_hello => .{ .server_hello = try ServerHello.unpack(hsbuf, sess) },
+                .certificate => .{ .certificate = try Certificate.unpack(hsbuf, sess) },
+                .server_key_exchange => .{ .server_key_exchange = try ServerKeyExchange.unpack(hsbuf, sess) },
+                .certificate_request => .{ .certificate_request = try CertificateRequest.unpack(hsbuf, sess) },
+                .server_hello_done => .{ .server_hello_done = try ServerHelloDone.unpack(hsbuf, sess) },
                 else => unreachable,
             },
         };

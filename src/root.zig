@@ -108,7 +108,7 @@ pub const BulkCipherAlgorithm = struct {};
 pub const MACAlgorithm = struct {};
 pub const CompressionMethod = ?void;
 
-const EllipticCurveCipher = struct {
+pub const EllipticCurveCipher = struct {
     curve: Curves = .{ .invalid = {} },
     key_material: ?std.crypto.dh.X25519.KeyPair = null,
 
@@ -146,10 +146,20 @@ const EllipticCurveCipher = struct {
         //try w.writeByte(204);
         //try w.writeByte(169);
 
-        const empty: [32]u8 = std.mem.zeroes([32]u8);
+        var empty: [32]u8 = std.mem.zeroes([32]u8);
+
+        @memcpy(&empty, "thisisagoodblob!" ** 2);
+        @memcpy(&empty, "thisisagoodblob!" ** 2);
+        var chacha = std.Random.ChaCha.init(empty);
+        var charand = chacha.random();
+        charand.bytes(&empty);
+
         const key_material = try std.crypto.dh.X25519.KeyPair.create(empty);
+
         //try w.writeByte(@intFromEnum(cke.pve));
-        try w.writeInt(u16, @truncate(key_material.public_key.len), std.builtin.Endian.big);
+        try w.writeByte(0);
+        //try w.writeInt(u16, @truncate(key_material.public_key.len), std.builtin.Endian.big);
+        try w.writeInt(u8, @truncate(key_material.public_key.len), std.builtin.Endian.big);
         try w.writeAll(&key_material.public_key);
         return 2 + key_material.public_key.len;
     }
@@ -167,7 +177,9 @@ const EllipticCurveCipher = struct {
 
         const curve_type = try CurveType.fromByte(try r.readByte());
         print("named curve {} {}\n", .{ try r.readByte(), try r.readByte() });
-        print("full buffer {any}\n", .{buffer});
+        print("full buffer {any}\n", .{buffer[0..4]});
+        print("full buffer {any}\n", .{buffer[4..][0..32]});
+        print("full buffer {any}\n", .{buffer[36..]});
         return .{
             .curve = switch (curve_type) {
                 .named_curve => .{ .named_curve = .{} },
@@ -222,158 +234,11 @@ const GenericAEADCipher = struct {};
 
 const HelloRequest = struct {};
 
-pub const ServerHello = struct {
-    version: Protocol.Version,
-    random: Random,
-    session_id: SessionID,
-    cipher: CipherSuite,
-    compression: Handshake.Compression,
-    extensions: []const Extension,
-
-    pub fn unpack(buffer: []const u8, _: *State) !ServerHello {
-        var fba = fixedBufferStream(buffer);
-        const r = fba.reader().any();
-
-        const version = Protocol.Version{
-            .major = try r.readByte(),
-            .minor = try r.readByte(),
-        };
-        var random = Random{
-            .random_bytes = undefined,
-        };
-        try r.readNoEof(&random.random_bytes);
-
-        const session_size = try r.readByte();
-        var session_id: [32]u8 = [_]u8{0} ** 32;
-        try r.readNoEof(session_id[0..session_size]);
-
-        // cipers
-        //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
-        const cipher: [2]u8 = [2]u8{
-            try r.readByte(),
-            try r.readByte(),
-        };
-        print("requested cipher {any}\n", .{cipher});
-
-        // compression
-        if (try r.readByte() != 0) return error.InvalidCompression;
-
-        // extensions
-        if (r.readInt(u16, std.builtin.Endian.big)) |extbytes| {
-            var extbuffer: [0x1000]u8 = undefined;
-            try r.readNoEof(extbuffer[0..extbytes]);
-        } else |err| switch (err) {
-            error.EndOfStream => print("server hello readerror {}\n", .{err}),
-            else => return err,
-        }
-
-        return .{
-            .version = version,
-            .random = random,
-            .session_id = session_id,
-            .cipher = cipher,
-            .compression = .null,
-            .extensions = &[0]Extension{},
-        };
-    }
-};
-
-pub const Certificate = struct {
-    buffer: []const u8,
-    session: *State,
-
-    pub fn unpack(buffer: []const u8, sess: *State) !Certificate {
-        return .{
-            .buffer = buffer,
-            .session = sess,
-        };
-    }
-};
-
-pub const ServerKeyExchange = struct {
-    buffer: []const u8,
-    cipher: *const Cipher,
-
-    pub fn pack(_: ServerKeyExchange, _: []u8) !usize {
-        return 0;
-    }
-
-    /// Will modify sess with supplied
-    pub fn unpack(buffer: []const u8, sess: *State) !ServerKeyExchange {
-        switch (sess.cipher.suite) {
-            .ecc => {
-                sess.cipher.suite.ecc = try EllipticCurveCipher.unpackKeyExchange(buffer);
-            },
-            else => unreachable,
-        }
-        return .{
-            .buffer = buffer,
-            .cipher = &sess.cipher,
-        };
-    }
-};
-
-pub const CertificateRequest = struct {
-    buffer: []const u8,
-    session: *State,
-
-    pub fn unpack(buffer: []const u8, sess: *State) !CertificateRequest {
-        return .{
-            .buffer = buffer,
-            .session = sess,
-        };
-    }
-};
-
-pub const ServerHelloDone = struct {
-    buffer: []const u8,
-    session: *State,
-
-    pub fn unpack(buffer: []const u8, sess: *State) !ServerHelloDone {
-        return .{
-            .buffer = buffer,
-            .session = sess,
-        };
-    }
-};
-
-const CertificateVerify = struct {};
-
 const ClientECDH = struct {
     _key_material: [255]u8 = [_]u8{8} ** 255,
     // 1..255
     point: []u8 = &[0]u8{},
 };
-
-pub const ClientKeyExchange = struct {
-    /// RFC 4492
-    pve: enum(u8) {
-        /// Provided in the client cert
-        implicit = 0,
-        /// specified next
-        explicit = 1,
-    } = .explicit,
-    cipher: *const Cipher,
-
-    pub fn init() !ClientKeyExchange {
-        const cke = ClientKeyExchange{
-            .cipher = &.{
-                .suite = .{ .ecc = EllipticCurveCipher{
-                    .curve = .{ .named_curve = .{} },
-                } },
-            },
-        };
-        return cke;
-    }
-
-    pub fn pack(cke: ClientKeyExchange, buffer: []u8) !usize {
-        return switch (cke.cipher.suite) {
-            .ecc => |ecc| ecc.packKeyExchange(buffer),
-            else => return error.NotImplemented,
-        };
-    }
-};
-
 const Finished = struct {};
 
 const HashAlgorithm = enum(u8) {
@@ -484,7 +349,7 @@ fn buildServer(data: []const u8) !void {
 
 fn completeClient(conn: std.net.Stream) !void {
     var buffer = [_]u8{0} ** 0x1000;
-    const cke = try ClientKeyExchange.init();
+    const cke = try Handshake.ClientKeyExchange.init();
     const cke_record = TLSRecord{
         .kind = .{
             .handshake = try Handshake.Handshake.wrap(cke),
@@ -493,7 +358,7 @@ fn completeClient(conn: std.net.Stream) !void {
 
     const cke_len = try cke_record.pack(&buffer);
     try std.testing.expectEqual(43, cke_len);
-    print("CKE: {any}\n", .{buffer[0..43]});
+    print("CKE: {any}\n", .{buffer[0..cke_len]});
     const ckeout = try conn.write(buffer[0..cke_len]);
     if (true) print("cke delivered, {}\n", .{ckeout});
 }
