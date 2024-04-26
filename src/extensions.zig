@@ -1,4 +1,6 @@
 const Extensions = @This();
+const std = @import("std");
+const fixedBufferStream = std.io.fixedBufferStream;
 
 pub const Flavor = union(enum) {
     sni: ServerNameIndicator,
@@ -6,21 +8,20 @@ pub const Flavor = union(enum) {
 
 pub const Extension = struct {
     ctx: *anyopaque,
-    pack_fn: *const fn (*anyopaque, []u8) usize,
+    pack_fn: *const fn (*anyopaque, []u8) anyerror!usize,
 
     pub fn unpack(buffer: []const u8) anyerror!Flavor {
         _ = buffer;
     }
 
-    pub fn pack(ext: Extension, buffer: []u8) usize {
+    pub fn pack(ext: Extension, buffer: []u8) !usize {
         return ext.pack_fn(ext.ctx, buffer);
     }
 };
 
 /// Server Name Indicator
 pub const ServerNameIndicator = struct {
-    len: usize = 0,
-    pub fn pack(_: ServerNameIndicator, buffer: []u8) usize {
+    pub fn pack(_: ServerNameIndicator, buffer: []u8) !usize {
         _ = buffer;
         //@memcpy(buffer[0..18], &[_]u8{ 0x00, 0x00, 0x00, 0x18, 0x00, 0x16, 0x00, 0x00, 0x13, 108, 111, 99, 97, 108, 104, 111, 115, 116 });
         return 0;
@@ -36,7 +37,6 @@ pub const ServerNameIndicator = struct {
 
 /// Signed certificate timestamp
 pub const SCT = struct {
-    len: usize = 4,
     pub fn pack(_: *anyopaque, buffer: []u8) usize {
         @memcpy(buffer[0..4], &[_]u8{ 0, 18, 0, 0 });
         return 4;
@@ -45,7 +45,6 @@ pub const SCT = struct {
 
 /// Status Request
 pub const StatusRequest = struct {
-    len: usize = 9,
     pub fn pack(_: *anyopaque, buffer: []u8) usize {
         @memcpy(buffer[0..9], &[_]u8{ 0, 5, 0, 5, 1, 0, 0, 0, 0 });
         return 9;
@@ -54,31 +53,69 @@ pub const StatusRequest = struct {
 
 //pub const SG = struct {
 pub const SupportedGroups = struct {
-    len: usize = 14,
-    pub fn pack(_: *anyopaque, buffer: []u8) usize {
-        @memcpy(buffer[0..14], &[_]u8{ 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x08, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18, 0x00, 0x19 });
-        return 14;
+    const EXT_TYPE: u16 = 0x000A;
+
+    pub fn packUntyped(ptr: *anyopaque, buffer: []u8) !usize {
+        const sg: *SupportedGroups = @alignCast(@ptrCast(ptr));
+        return pack(sg, buffer);
+    }
+
+    pub fn pack(_: *SupportedGroups, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        var w = fba.writer().any();
+        try w.writeInt(u16, EXT_TYPE, .big);
+
+        const supported = [_]u16{
+            0x001d,
+        };
+
+        try w.writeInt(u16, 4, .big);
+        try w.writeInt(u16, supported.len * 2, .big);
+        for (supported) |each| try w.writeInt(u16, each, .big);
+
+        return 6 + supported.len * 2;
     }
 
     pub fn extension(sg: *SupportedGroups) Extension {
         return .{
             .ctx = sg,
-            .pack_fn = pack,
+            .pack_fn = packUntyped,
         };
     }
 };
 
 pub const SignatureAlgorithms = struct {
-    len: usize = 22,
-    pub fn pack(_: *anyopaque, buffer: []u8) usize {
-        @memcpy(buffer[0..22], &[_]u8{ 0x00, 0x0d, 0x00, 0x12, 0x00, 0x10, 0x04, 0x01, 0x04, 0x03, 0x05, 0x01, 0x05, 0x03, 0x06, 0x01, 0x06, 0x03, 0x02, 0x01, 0x02, 0x03 });
-        return 22;
+    const EXT_TYPE: u16 = 0x000D;
+    pub fn packUntyped(ptr: *anyopaque, buffer: []u8) !usize {
+        const sa: *SignatureAlgorithms = @alignCast(@ptrCast(ptr));
+        return pack(sa, buffer);
+    }
+
+    pub fn pack(_: *SignatureAlgorithms, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        var w = fba.writer().any();
+        try w.writeInt(u16, EXT_TYPE, .big);
+
+        //HashAlgorithm; enum { none(0), md5(1), sha1(2), sha224(3), sha256(4), sha384(5), sha512(6), }
+        //SignatureAlgorithm; enum { anonymous(0), rsa(1), dsa(2), ecdsa(3), }
+
+        const supported = [_]u16{
+            0x0401,
+            0x0403,
+            //0x0007,
+        };
+
+        try w.writeInt(u16, supported.len * 2 + 2, .big);
+        try w.writeInt(u16, supported.len * 2, .big);
+        for (supported) |each| try w.writeInt(u16, each, .big);
+
+        return 6 + supported.len * 2;
     }
 
     pub fn extension(sg: *SignatureAlgorithms) Extension {
         return .{
             .ctx = sg,
-            .pack_fn = pack,
+            .pack_fn = packUntyped,
         };
     }
 };
