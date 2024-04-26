@@ -1,3 +1,4 @@
+const std = @import("std");
 pub const Alert = @This();
 
 level: Level,
@@ -13,6 +14,13 @@ pub fn unpack(buffer: []const u8) !Alert {
         },
         .description = try Description.fromByte(buffer[1]),
     };
+}
+
+pub fn format(self: Alert, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+    try out.print("Alert from peer ({s}) {s}\n", .{
+        @tagName(self.level),
+        @tagName(self.description),
+    });
 }
 
 pub const Level = enum(u8) {

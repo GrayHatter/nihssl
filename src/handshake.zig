@@ -27,6 +27,7 @@ const Extensions = @import("extensions.zig");
 const Extension = Extensions.Extension;
 
 const fixedBufferStream = std.io.fixedBufferStream;
+const print = std.debug.print;
 
 var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
 
@@ -49,30 +50,10 @@ pub const ClientHello = struct {
     };
 
     pub const SupportedSuiteList = [_]CipherSuite{
-        CipherSuites.TLS_DH_DSS_WITH_AES_128_CBC_SHA256,
-        CipherSuites.TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
-        CipherSuites.TLS_DH_RSA_WITH_AES_256_CBC_SHA256,
         CipherSuites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-        CipherSuites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-
-        CipherSuites.TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA,
-        CipherSuites.TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA,
-        CipherSuites.TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA,
-        CipherSuites.TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
-        CipherSuites.TLS_DH_DSS_WITH_AES_128_CBC_SHA,
-        CipherSuites.TLS_DH_RSA_WITH_AES_128_CBC_SHA,
-        CipherSuites.TLS_DHE_DSS_WITH_AES_128_CBC_SHA,
-        CipherSuites.TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
-        CipherSuites.TLS_DH_DSS_WITH_AES_256_CBC_SHA,
-        CipherSuites.TLS_DH_RSA_WITH_AES_256_CBC_SHA,
-        CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA,
-        CipherSuites.TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
-        CipherSuites.TLS_DH_RSA_WITH_AES_128_CBC_SHA256,
-        CipherSuites.TLS_DHE_DSS_WITH_AES_128_CBC_SHA256,
-        CipherSuites.TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
-        CipherSuites.TLS_DH_DSS_WITH_AES_256_CBC_SHA256,
-        CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
+        //CipherSuites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        //CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
     };
     pub const length = @sizeOf(ClientHello);
 
@@ -102,8 +83,7 @@ pub const ClientHello = struct {
         //try w.writeByte(ch.session_id.len);
         //try w.writeAll(&ch.session_id);
 
-        const c_count: u16 = @truncate(ch.ciphers.len);
-        try w.writeInt(u16, c_count * 2, std.builtin.Endian.big);
+        try w.writeInt(u16, @truncate(ch.ciphers.len * 2), std.builtin.Endian.big);
         for (ch.ciphers) |cipher| {
             try w.writeByte(cipher[0]);
             try w.writeByte(cipher[1]);
@@ -116,7 +96,7 @@ pub const ClientHello = struct {
         inline for (SupportedExtensions) |extension| {
             var extt = extension{};
             var ext = extt.extension();
-            e_count += @truncate(ext.pack(extension_buffer[e_count..]));
+            e_count += @truncate(try ext.pack(extension_buffer[e_count..]));
         }
         try w.writeInt(u16, e_count, std.builtin.Endian.big);
         try w.writeAll(extension_buffer[0..e_count]);
@@ -159,6 +139,23 @@ pub const ClientKeyExchange = struct {
     }
 };
 
+pub const Finished = struct {
+    pub fn pack(_: Finished, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        var w = fba.writer().any();
+
+        const iv = [0x10]u8{
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+        };
+        try w.writeAll(&iv);
+        const encrypted = [_]u8{0} ** 0x30;
+
+        try w.writeAll(&encrypted);
+        return 0x40;
+    }
+};
+
 /// Server Section
 pub const ServerHello = struct {
     version: Protocol.Version,
@@ -169,6 +166,7 @@ pub const ServerHello = struct {
     extensions: []const Extension,
 
     pub fn unpack(buffer: []const u8, _: *State) !ServerHello {
+        print("buffer:: {any}\n", .{buffer});
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
 
@@ -200,7 +198,7 @@ pub const ServerHello = struct {
             var extbuffer: [0x1000]u8 = undefined;
             try r.readNoEof(extbuffer[0..extbytes]);
         } else |err| switch (err) {
-            error.EndOfStream => std.debug.print("server hello readerror {}\n", .{err}),
+            error.EndOfStream => if (false) print("SrvHelo no extensions\n", .{}),
             else => return err,
         }
 
@@ -338,7 +336,7 @@ const Handshakes = union(Type) {
     server_hello_done: ServerHelloDone,
     certificate_verify: void,
     client_key_exchange: ClientKeyExchange,
-    finished: void,
+    finished: Finished,
 };
 
 pub const Handshake = struct {
@@ -357,6 +355,10 @@ pub const Handshake = struct {
                 .msg_type = .client_key_exchange,
                 .body = .{ .client_key_exchange = any },
             },
+            Finished => .{
+                .msg_type = .finished,
+                .body = .{ .finished = any },
+            },
             else => comptime unreachable,
         };
     }
@@ -367,6 +369,7 @@ pub const Handshake = struct {
         const len = switch (hs.body) {
             .client_hello => |ch| try ch.pack(buffer[4..]),
             .client_key_exchange => |cke| try cke.pack(buffer[4..]),
+            .finished => |fin| try fin.pack(buffer[4..]),
             else => unreachable,
         };
         std.debug.assert(len < std.math.maxInt(u24));
