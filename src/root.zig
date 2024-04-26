@@ -330,12 +330,8 @@ fn buildServer(data: []const u8) !void {
                     .server_hello => |hello| {
                         print("server hello {}\n", .{@TypeOf(hello)});
                         print("srv selected suite {any}\n", .{hello.cipher});
-                        print("test selected suite {any}\n", .{CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256});
-                        if (std.mem.eql(
-                            u8,
-                            &hello.cipher,
-                            &CipherSuites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-                        )) {
+                        print("test selected suite {any}\n", .{.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256});
+                        if (hello.cipher == .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256) {
                             session.cipher.suite = .{ .ecc = .{} };
                         } else {
                             return error.UnexpectedCipherSuite;
@@ -437,7 +433,7 @@ test "mock server response" {
     const server_data = [_]u8{
         22, 3, 3, 0, 74,
         2, 0, 0, 70,
-            3, 3, 75, 127, 236, 41, 6, 185, 127, 156, 38, 101, 
+            3, 3, 75, 127, 236, 41, 6, 185, 127, 156, 38, 101,
             41, 80, 93, 16, 140, 154, 60, 40, 250, 248, 115,
             110, 115, 15, 68, 79, 87, 78, 71, 82, 68, 1, 32,
             24, 187, 143, 225, 245, 127, 101, 130, 182, 200,
@@ -551,153 +547,38 @@ test "mock server response" {
     //print("CKE: {any}\n", .{buffer[0..43]});
 }
 
-pub const CipherSuite = [2]u8;
-
-pub const CipherSuites = struct {
-    pub const TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B };
-    pub const TLS_DH_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x69 };
-    pub const TLS_DH_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3E };
-
-    pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA8 };
-    pub const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA9 };
-    pub const TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAA };
-
-    pub const TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x0D };
-    pub const TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x10 };
-    pub const TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x13 };
-    pub const TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x16 };
-    pub const TLS_DH_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x30 };
-    pub const TLS_DH_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x31 };
-    pub const TLS_DHE_DSS_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x32 };
-    pub const TLS_DHE_RSA_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x33 };
-    pub const TLS_DH_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x36 };
-    pub const TLS_DH_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x37 };
-    pub const TLS_DHE_DSS_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x38 };
-    pub const TLS_DHE_RSA_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x39 };
-
-    pub const TLS_DH_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x3F };
-    pub const TLS_DHE_DSS_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x40 };
-    pub const TLS_DHE_RSA_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x67 };
-    pub const TLS_DH_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x68 };
-    pub const TLS_DHE_DSS_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6A };
-    // RFC7905
-    //TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA8 },
-    //TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xA9 },
-    //TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAA },
-
-    // RFC5246
-    TLS_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAB },
-    TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAC },
-    TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAD },
-    TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = .{ 0xCC, 0xAE },
-    //TLS_DHE_RSA_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6B },
-
-    // The following cipher suites are used for completely anonymous
-    // Diffie-Hellman communications in which neither party is
-    // authenticated.  Note that this mode is vulnerable to man-in-the-
-    // middle attacks.  Using this mode therefore is of limited use: These
-    // cipher suites MUST NOT be used by TLS 1.2 implementations unless the
-    // application layer has specifically requested to allow anonymous key
-    // exchange.  (Anonymous key exchange may sometimes be acceptable, for
-    // example, to support opportunistic encryption when no set-up for
-    // authentication is in place, or when TLS is used as part of more
-    // complex security protocols that have other means to ensure
-    // authentication.)
-
-    TLS_DH_anon_WITH_RC4_128_MD5: CipherSuite = .{ 0x00, 0x18 },
-    TLS_DH_anon_WITH_3DES_EDE_CBC_SHA: CipherSuite = .{ 0x00, 0x1B },
-    TLS_DH_anon_WITH_AES_128_CBC_SHA: CipherSuite = .{ 0x00, 0x34 },
-    TLS_DH_anon_WITH_AES_256_CBC_SHA: CipherSuite = .{ 0x00, 0x3A },
-    TLS_DH_anon_WITH_AES_128_CBC_SHA256: CipherSuite = .{ 0x00, 0x6C },
-    TLS_DH_anon_WITH_AES_256_CBC_SHA256: CipherSuite = .{ 0x00, 0x6D },
-
-    // Note that using non-anonymous key exchange without actually verifying
-    // the key exchange is essentially equivalent to anonymous key exchange,
-    // and the same precautions apply.  While non-anonymous key exchange
-    // will generally involve a higher computational and communicational
-    // cost than anonymous key exchange, it may be in the interest of
-    // interoperability not to disable non-anonymous key exchange when the
-    // application layer is allowing anonymous key exchange.
-
-    // New cipher suite values have been assigned by IANA as described in
-    // Section 12.
-
-    // Note: The cipher suite values { 0x00, 0x1C } and { 0x00, 0x1D } are
-    // reserved to avoid collision with Fortezza-based cipher suites in
-    // SSL 3.
+pub const CipherSuites = enum(u16) {
+    TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA = 0x0013,
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA = 0x0032,
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA256 = 0x0040,
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA = 0x0038,
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA256 = 0x006A,
+    TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAD,
+    TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA = 0x0016,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA = 0x0033,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 = 0x0067,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA = 0x0039,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256 = 0x006B,
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAA,
+    TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA = 0x000D,
+    TLS_DH_DSS_WITH_AES_128_CBC_SHA = 0x0030,
+    TLS_DH_DSS_WITH_AES_128_CBC_SHA256 = 0x003E,
+    TLS_DH_DSS_WITH_AES_256_CBC_SHA = 0x0036,
+    TLS_DH_DSS_WITH_AES_256_CBC_SHA256 = 0x0068,
+    TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA = 0x0010,
+    TLS_DH_RSA_WITH_AES_128_CBC_SHA = 0x0031,
+    TLS_DH_RSA_WITH_AES_128_CBC_SHA256 = 0x003F,
+    TLS_DH_RSA_WITH_AES_256_CBC_SHA = 0x0037,
+    TLS_DH_RSA_WITH_AES_256_CBC_SHA256 = 0x0069,
+    TLS_DH_anon_WITH_3DES_EDE_CBC_SHA = 0x001B,
+    TLS_DH_anon_WITH_AES_128_CBC_SHA = 0x0034,
+    TLS_DH_anon_WITH_AES_128_CBC_SHA256 = 0x006C,
+    TLS_DH_anon_WITH_AES_256_CBC_SHA = 0x003A,
+    TLS_DH_anon_WITH_AES_256_CBC_SHA256 = 0x006D,
+    TLS_DH_anon_WITH_RC4_128_MD5 = 0x0018,
+    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
+    TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAC,
+    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA8,
+    TLS_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAB,
+    TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE,
 };
-
-// Cipher Suite                            Key Excg     Cipher         Mac
-//
-// TLS_NULL_WITH_NULL_NULL                 NULL         NULL         NULL
-// TLS_RSA_WITH_NULL_MD5                   RSA          NULL         MD5
-// TLS_RSA_WITH_NULL_SHA                   RSA          NULL         SHA
-// TLS_RSA_WITH_NULL_SHA256                RSA          NULL         SHA256
-// TLS_RSA_WITH_RC4_128_MD5                RSA          RC4_128      MD5
-// TLS_RSA_WITH_RC4_128_SHA                RSA          RC4_128      SHA
-// TLS_RSA_WITH_3DES_EDE_CBC_SHA           RSA          3DES_EDE_CBC SHA
-// TLS_RSA_WITH_AES_128_CBC_SHA            RSA          AES_128_CBC  SHA
-// TLS_RSA_WITH_AES_256_CBC_SHA            RSA          AES_256_CBC  SHA
-// TLS_RSA_WITH_AES_128_CBC_SHA256         RSA          AES_128_CBC  SHA256
-// TLS_RSA_WITH_AES_256_CBC_SHA256         RSA          AES_256_CBC  SHA256
-// TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA        DH_DSS       3DES_EDE_CBC SHA
-// TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA        DH_RSA       3DES_EDE_CBC SHA
-// TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA       DHE_DSS      3DES_EDE_CBC SHA
-// TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA       DHE_RSA      3DES_EDE_CBC SHA
-// TLS_DH_anon_WITH_RC4_128_MD5            DH_anon      RC4_128      MD5
-// TLS_DH_anon_WITH_3DES_EDE_CBC_SHA       DH_anon      3DES_EDE_CBC SHA
-// TLS_DH_DSS_WITH_AES_128_CBC_SHA         DH_DSS       AES_128_CBC  SHA
-// TLS_DH_RSA_WITH_AES_128_CBC_SHA         DH_RSA       AES_128_CBC  SHA
-// TLS_DHE_DSS_WITH_AES_128_CBC_SHA        DHE_DSS      AES_128_CBC  SHA
-// TLS_DHE_RSA_WITH_AES_128_CBC_SHA        DHE_RSA      AES_128_CBC  SHA
-// TLS_DH_anon_WITH_AES_128_CBC_SHA        DH_anon      AES_128_CBC  SHA
-// TLS_DH_DSS_WITH_AES_256_CBC_SHA         DH_DSS       AES_256_CBC  SHA
-// TLS_DH_RSA_WITH_AES_256_CBC_SHA         DH_RSA       AES_256_CBC  SHA
-// TLS_DHE_DSS_WITH_AES_256_CBC_SHA        DHE_DSS      AE4, 3, 2, 3S_256_CBC  SHA
-// TLS_DHE_RSA_WITH_AES_256_CBC_SHA        DHE_RSA      AES_256_CBC  SHA
-// TLS_DH_anon_WITH_AES_256_CBC_SHA        DH_anon      AES_256_CBC  SHA
-// TLS_DH_DSS_WITH_AES_128_CBC_SHA256      DH_DSS       AES_128_CBC  SHA256
-// TLS_DH_RSA_WITH_AES_128_CBC_SHA256      DH_RSA       AES_128_CBC  SHA256
-// TLS_DHE_DSS_WITH_AES_128_CBC_SHA256     DHE_DSS      AES_128_CBC  SHA256
-// TLS_DHE_RSA_WITH_AES_128_CBC_SHA256     DHE_RSA      AES_128_CBC  SHA256
-// TLS_DH_anon_WITH_AES_128_CBC_SHA256     DH_anon      AES_128_CBC  SHA256
-// TLS_DH_DSS_WITH_AES_256_CBC_SHA256      DH_DSS       AES_256_CBC  SHA256
-// TLS_DH_RSA_WITH_AES_256_CBC_SHA256      DH_RSA       AES_256_CBC  SHA256
-// TLS_DHE_DSS_WITH_AES_256_CBC_SHA256     DHE_DSS      AES_256_CBC  SHA256
-// TLS_DHE_RSA_WITH_AES_256_CBC_SHA256     DHE_RSA      AES_256_CBC  SHA256
-// TLS_DH_anon_WITH_AES_256_CBC_SHA256     DH_anon      AES_256_CBC  SHA256
-//
-//                         Key      IV   Block
-// Cipher        Type    Material  Size  Size
-// ------------  ------  --------  ----  -----
-// NULL          Stream      0       0    N/A
-// RC4_128       Stream     16       0    N/A
-// 3DES_EDE_CBC  Block      24       8      8
-// AES_128_CBC   Block      16      16     16
-// AES_256_CBC   Block      32      16     16
-//
-// MAC       Algorithm    mac_length  mac_key_length
-// --------  -----------  ----------  --------------
-// NULL      N/A              0             0
-// MD5       HMAC-MD5        16            16
-// SHA       HMAC-SHA1       20            20
-// SHA256    HMAC-SHA256     32            32
-//
-//    Type
-//       Indicates whether this is a stream cipher or a block cipher
-//       running in CBC mode.
-//
-//    Key Material
-//       The number of bytes from the key_block that are used for
-//       generating the write keys.
-//
-//    IV Size
-//       The amount of data needed to be generated for the initialization
-//       vector.  Zero for stream ciphers; equal to the block size for
-//       block ciphers (this is equal to
-//       SecurityParameters.record_iv_length).
-//
-//    Block Size
-//       The amount of data a block cipher enciphers in one chunk; a block
-//       cipher running in CBC mode can only encrypt an even multiple of
-//       its block size.

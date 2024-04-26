@@ -84,6 +84,35 @@ pub const SupportedGroups = struct {
     }
 };
 
+const HashAlgos = enum(u8) {
+    none = 0,
+    md5 = 1,
+    sha1 = 2,
+    sha224 = 3,
+    sha256 = 4,
+    sha384 = 5,
+    sha512 = 6,
+    //7 Reserved
+    //8 Intrinsic
+    //9-223 Reserved
+    //224-255 Private Use
+};
+
+const SignatureAlgos = enum(u8) {
+    anon = 0,
+    rsa = 1,
+    dsa = 2,
+    ecdsa = 3,
+    // 4-6  Reserved
+    ed25519 = 7,
+    ed448 = 8,
+    //9-63  Reserved
+    gostr34102012_256 = 64,
+    gostr34102012_512 = 65,
+    // 66-223 Reserved
+    // 224-255  Private Use
+};
+
 pub const SignatureAlgorithms = struct {
     const EXT_TYPE: u16 = 0x000D;
     pub fn packUntyped(ptr: *anyopaque, buffer: []u8) !usize {

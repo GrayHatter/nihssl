@@ -21,7 +21,6 @@ const Protocol = @import("protocol.zig");
 const root = @import("root.zig");
 const Random = root.Random;
 const SessionID = root.SessionID;
-const CipherSuite = root.CipherSuite;
 const CipherSuites = root.CipherSuites;
 const Extensions = @import("extensions.zig");
 const Extension = Extensions.Extension;
@@ -40,7 +39,7 @@ pub const ClientHello = struct {
     version: Protocol.Version,
     random: Random,
     session_id: SessionID,
-    ciphers: []const CipherSuite = &[0]CipherSuite{},
+    ciphers: []const CipherSuites = &[0]CipherSuites{},
     compression: Compression,
     extensions: []const Extension = &[0]Extension{},
 
@@ -49,7 +48,7 @@ pub const ClientHello = struct {
         Extensions.SignatureAlgorithms,
     };
 
-    pub const SupportedSuiteList = [_]CipherSuite{
+    pub const SupportedSuiteList = [_]CipherSuites{
         CipherSuites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         //CipherSuites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
@@ -85,8 +84,7 @@ pub const ClientHello = struct {
 
         try w.writeInt(u16, @truncate(ch.ciphers.len * 2), std.builtin.Endian.big);
         for (ch.ciphers) |cipher| {
-            try w.writeByte(cipher[0]);
-            try w.writeByte(cipher[1]);
+            try w.writeInt(u16, @intFromEnum(cipher), .big);
         }
         try w.writeByte(1);
         try w.writeByte(@intFromEnum(ch.compression));
@@ -161,7 +159,7 @@ pub const ServerHello = struct {
     version: Protocol.Version,
     random: Random,
     session_id: SessionID,
-    cipher: CipherSuite,
+    cipher: CipherSuites,
     compression: Compression,
     extensions: []const Extension,
 
@@ -185,10 +183,7 @@ pub const ServerHello = struct {
 
         // cipers
         //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
-        const cipher: [2]u8 = [2]u8{
-            try r.readByte(),
-            try r.readByte(),
-        };
+        const cipher: CipherSuites = @enumFromInt(try r.readInt(u16, .big));
 
         // compression
         if (try r.readByte() != 0) return error.InvalidCompression;
