@@ -196,19 +196,6 @@ pub const Cipher = struct {
     } = .{ .invalid = {} },
 };
 
-//   Implementations MUST NOT send zero-length fragments of Handshake,
-//   Alert, or ChangeCipherSpec content types.  Zero-length fragments of
-//   Application data MAY be sent as they are potentially useful as a
-//   traffic analysis countermeasure.
-//
-//   Note: Data of different TLS record layer content types MAY be
-//   interleaved.  Application data is generally of lower precedence for
-//   transmission than other content types.  However, records MUST be
-//   delivered to the network in the same order as they are protected by
-//   the record layer.  Recipients MUST receive and process interleaved
-//   application layer traffic during handshakes subsequent to the first
-//   one on a connection.
-
 pub const CipherType = enum {
     stream,
     block,
@@ -218,19 +205,6 @@ pub const CipherType = enum {
 const GenericStreamCipher = struct {};
 const GenericBlockCipher = struct {};
 const GenericAEADCipher = struct {};
-
-//fn TLSCiphertext(comptime frgmt: CipherType) type {
-//    return struct {
-//        type: ContentType,
-//        version: ProtocolVersion,
-//        length: u16,
-//        fragment: switch (frgmt) {
-//            .stream => GenericStreamCipher,
-//            .block => GenericBlockCipher,
-//            .aead => GenericAEADCipher,
-//        },
-//    };
-//}
 
 const HelloRequest = struct {};
 
