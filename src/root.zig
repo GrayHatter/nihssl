@@ -178,9 +178,7 @@ fn buildServer(data: []const u8) !void {
                         print("server hello {}\n", .{@TypeOf(hello)});
                         print("srv selected suite {any}\n", .{hello.cipher});
                         print("test selected suite {any}\n", .{.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256});
-                        if (hello.cipher == .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256) {
-                            session.cipher.suite = .{ .ecc = .{} };
-                        } else {
+                        if (session.cipher.suite != .ecc) {
                             return error.UnexpectedCipherSuite;
                         }
                     },

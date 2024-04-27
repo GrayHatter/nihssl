@@ -55,9 +55,8 @@ pub const ClientHello = struct {
     pub const SupportedSuiteList = [_]Cipher.Suites{
         Cipher.Suites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         Cipher.Suites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-        //Cipher.Suites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        //Cipher.Suites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
     };
+
     pub const length = @sizeOf(ClientHello);
 
     pub fn init() ClientHello {
@@ -162,12 +161,11 @@ pub const Finished = struct {
 pub const ServerHello = struct {
     version: Protocol.Version,
     random: Random,
-    session_id: SessionID,
-    cipher: Cipher.Suites,
+    cipher: ?Cipher.Suites = null,
     compression: Compression,
     extensions: []const Extension,
 
-    pub fn unpack(buffer: []const u8, _: *State) !ServerHello {
+    pub fn unpack(buffer: []const u8, sess: *State) !ServerHello {
         print("buffer:: {any}\n", .{buffer});
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
@@ -184,11 +182,20 @@ pub const ServerHello = struct {
         const session_size = try r.readByte();
         var session_id: [32]u8 = [_]u8{0} ** 32;
         try r.readNoEof(session_id[0..session_size]);
+        // TODO verify session id matches
 
         // cipers
         //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
         // FIXME
-        const cipher: Cipher.Suites = @enumFromInt(try r.readInt(u16, .big));
+        const cipher_request = Cipher.Suites.fromInt(try r.readInt(u16, .big));
+        switch (cipher_request) {
+            .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            => {
+                sess.cipher.suite = .{ .ecc = .{} };
+            },
+            else => unreachable,
+        }
 
         // compression
         if (try r.readByte() != 0) return error.InvalidCompression;
@@ -205,8 +212,6 @@ pub const ServerHello = struct {
         return .{
             .version = version,
             .random = random,
-            .session_id = session_id,
-            .cipher = cipher,
             .compression = .null,
             .extensions = &[0]Extension{},
         };

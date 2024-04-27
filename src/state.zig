@@ -9,10 +9,12 @@ const PRFAlgorithm = root.PRFAlgorithm;
 const BulkCipherAlgorithm = root.BulkCipherAlgorithm;
 const MACAlgorithm = root.MACAlgorithm;
 const CompressionMethod = root.CompressionMethod;
+const SessionID = root.SessionID;
 
 pub const State = @This();
 
 cipher: Cipher = .{},
+session_id: ?SessionID = null,
 entity: ConnectionEnd = .{},
 prf_algorithm: PRFAlgorithm = .{},
 mac_algorithm: MACAlgorithm = .{},
