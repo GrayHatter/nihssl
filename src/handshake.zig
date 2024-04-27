@@ -16,13 +16,15 @@
 ///
 ///
 const std = @import("std");
+
 const State = @import("state.zig");
 const Protocol = @import("protocol.zig");
 const root = @import("root.zig");
+const Extensions = @import("extensions.zig");
+const Cipher = @import("cipher.zig");
+
 const Random = root.Random;
 const SessionID = root.SessionID;
-const CipherSuites = root.CipherSuites;
-const Extensions = @import("extensions.zig");
 const Extension = Extensions.Extension;
 
 const fixedBufferStream = std.io.fixedBufferStream;
@@ -34,12 +36,14 @@ pub const Compression = enum(u8) {
     null = 0,
 };
 
+const HelloRequest = struct {};
+
 /// Client Section
 pub const ClientHello = struct {
     version: Protocol.Version,
     random: Random,
     session_id: SessionID,
-    ciphers: []const CipherSuites = &[0]CipherSuites{},
+    ciphers: []const Cipher.Suites = &[0]Cipher.Suites{},
     compression: Compression,
     extensions: []const Extension = &[0]Extension{},
 
@@ -48,11 +52,11 @@ pub const ClientHello = struct {
         Extensions.SignatureAlgorithms,
     };
 
-    pub const SupportedSuiteList = [_]CipherSuites{
-        CipherSuites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        CipherSuites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-        //CipherSuites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        //CipherSuites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
+    pub const SupportedSuiteList = [_]Cipher.Suites{
+        Cipher.Suites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        Cipher.Suites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        //Cipher.Suites.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        //Cipher.Suites.TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
     };
     pub const length = @sizeOf(ClientHello);
 
@@ -116,12 +120,12 @@ pub const ClientKeyExchange = struct {
         /// specified next
         explicit = 1,
     } = .explicit,
-    cipher: *const root.Cipher,
+    cipher: *const Cipher,
 
     pub fn init() !ClientKeyExchange {
         const cke = ClientKeyExchange{
             .cipher = &.{
-                .suite = .{ .ecc = root.EllipticCurveCipher{
+                .suite = .{ .ecc = Cipher.EllipticCurve{
                     .curve = .{ .named_curve = .{} },
                 } },
             },
@@ -159,7 +163,7 @@ pub const ServerHello = struct {
     version: Protocol.Version,
     random: Random,
     session_id: SessionID,
-    cipher: CipherSuites,
+    cipher: Cipher.Suites,
     compression: Compression,
     extensions: []const Extension,
 
@@ -183,7 +187,8 @@ pub const ServerHello = struct {
 
         // cipers
         //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
-        const cipher: CipherSuites = @enumFromInt(try r.readInt(u16, .big));
+        // FIXME
+        const cipher: Cipher.Suites = @enumFromInt(try r.readInt(u16, .big));
 
         // compression
         if (try r.readByte() != 0) return error.InvalidCompression;
@@ -210,7 +215,7 @@ pub const ServerHello = struct {
 
 pub const ServerKeyExchange = struct {
     buffer: []const u8,
-    cipher: *const root.Cipher,
+    cipher: *const Cipher,
 
     pub fn pack(_: ServerKeyExchange, _: []u8) !usize {
         return 0;
@@ -220,7 +225,7 @@ pub const ServerKeyExchange = struct {
     pub fn unpack(buffer: []const u8, sess: *State) !ServerKeyExchange {
         switch (sess.cipher.suite) {
             .ecc => {
-                sess.cipher.suite.ecc = try root.EllipticCurveCipher.unpackKeyExchange(buffer);
+                sess.cipher.suite.ecc = try Cipher.EllipticCurve.unpackKeyExchange(buffer);
             },
             else => unreachable,
         }
@@ -255,6 +260,7 @@ pub const Certificate = struct {
         };
     }
 };
+
 pub const CertificateRequest = struct {
     buffer: []const u8,
     session: *State,

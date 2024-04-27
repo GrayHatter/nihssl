@@ -113,6 +113,30 @@ const SignatureAlgos = enum(u8) {
     // 224-255  Private Use
 };
 
+//const HashAlgorithm = enum(u8) {
+//    none = 0,
+//    md5 = 1,
+//    sha1 = 2,
+//    sha224 = 3,
+//    sha256 = 4,
+//    sha384 = 5,
+//
+//    sha512 = 6,
+//};
+//
+//const SignatureAlgorithm = enum(u8) {
+//    anonymous = 0,
+//    rsa = 1,
+//    dsa = 2,
+//    ecdsa = 3,
+//};
+//
+//const SignatureAndHashAlgorithm = struct {
+//    hash: HashAlgorithm,
+//    signature: SignatureAlgorithm,
+//};
+//
+
 pub const SignatureAlgorithms = struct {
     const EXT_TYPE: u16 = 0x000D;
     pub fn packUntyped(ptr: *anyopaque, buffer: []u8) !usize {
