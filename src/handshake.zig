@@ -17,13 +17,13 @@
 ///
 const std = @import("std");
 
-const State = @import("state.zig");
+const ConnCtx = @import("context.zig");
 const Protocol = @import("protocol.zig");
 const root = @import("root.zig");
 const Extensions = @import("extensions.zig");
 const Cipher = @import("cipher.zig");
 
-const Random = root.Random;
+const Random = [32]u8;
 const SessionID = root.SessionID;
 const Extension = Extensions.Extension;
 
@@ -40,11 +40,11 @@ const HelloRequest = struct {};
 
 /// Client Section
 pub const ClientHello = struct {
-    version: Protocol.Version,
+    version: Protocol.Version = Protocol.TLSv1_2,
     random: Random,
     session_id: SessionID,
-    ciphers: []const Cipher.Suites = &[0]Cipher.Suites{},
-    compression: Compression,
+    ciphers: []const Cipher.Suites = &SupportedSuiteList,
+    compression: Compression = .null,
     extensions: []const Extension = &[0]Extension{},
 
     pub const SupportedExtensions = [_]type{
@@ -59,18 +59,13 @@ pub const ClientHello = struct {
 
     pub const length = @sizeOf(ClientHello);
 
-    pub fn init() ClientHello {
+    pub fn init(rand: Random) ClientHello {
         var hello = ClientHello{
-            .version = .{ .major = 3, .minor = 3 },
-            .random = .{
-                .random_bytes = undefined,
-            },
+            .random = rand,
             .session_id = [_]u8{0} ** 32,
-            .ciphers = &SupportedSuiteList,
-            .compression = .null,
         };
 
-        csprng.fill(&hello.random.random_bytes);
+        //csprng.fill(&hello.random.random_bytes);
         csprng.fill(&hello.session_id);
         return hello;
     }
@@ -80,7 +75,7 @@ pub const ClientHello = struct {
         var w = fba.writer().any();
         try w.writeByte(ch.version.major);
         try w.writeByte(ch.version.minor);
-        try w.writeStruct(ch.random);
+        try w.writeAll(&ch.random);
         try w.writeByte(0);
         //try w.writeByte(ch.session_id.len);
         //try w.writeAll(&ch.session_id);
@@ -105,7 +100,7 @@ pub const ClientHello = struct {
         return fba.pos;
     }
 
-    pub fn unpack(buffer: []const u8, _: *State) !ClientHello {
+    pub fn unpack(buffer: []const u8, _: *ConnCtx) !ClientHello {
         _ = buffer;
         unreachable;
     }
@@ -121,14 +116,8 @@ pub const ClientKeyExchange = struct {
     } = .explicit,
     cipher: *const Cipher,
 
-    pub fn init() !ClientKeyExchange {
-        const cke = ClientKeyExchange{
-            .cipher = &.{
-                .suite = .{ .ecc = Cipher.EllipticCurve{
-                    .curve = .{ .named_curve = .{} },
-                } },
-            },
-        };
+    pub fn init(ctx: *ConnCtx) !ClientKeyExchange {
+        const cke = ClientKeyExchange{ .cipher = &ctx.cipher };
         return cke;
     }
 
@@ -165,7 +154,7 @@ pub const ServerHello = struct {
     compression: Compression,
     extensions: []const Extension,
 
-    pub fn unpack(buffer: []const u8, sess: *State) !ServerHello {
+    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !ServerHello {
         print("buffer:: {any}\n", .{buffer});
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
@@ -174,10 +163,8 @@ pub const ServerHello = struct {
             .major = try r.readByte(),
             .minor = try r.readByte(),
         };
-        var random = Random{
-            .random_bytes = undefined,
-        };
-        try r.readNoEof(&random.random_bytes);
+        var random: [32]u8 = undefined;
+        try r.readNoEof(&random);
 
         const session_size = try r.readByte();
         var session_id: [32]u8 = [_]u8{0} ** 32;
@@ -192,16 +179,16 @@ pub const ServerHello = struct {
             .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
             .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
             => {
-                sess.cipher.suite = .{ .ecc = .{} };
+                ctx.cipher.suite = .{ .ecc = undefined };
             },
-            else => unreachable,
+            //else => unreachable,
         }
 
         // compression
         if (try r.readByte() != 0) return error.InvalidCompression;
 
         // extensions
-        if (r.readInt(u16, std.builtin.Endian.big)) |extbytes| {
+        if (r.readInt(u16, .big)) |extbytes| {
             var extbuffer: [0x1000]u8 = undefined;
             try r.readNoEof(extbuffer[0..extbytes]);
         } else |err| switch (err) {
@@ -227,25 +214,23 @@ pub const ServerKeyExchange = struct {
     }
 
     /// Will modify sess with supplied
-    pub fn unpack(buffer: []const u8, sess: *State) !ServerKeyExchange {
-        switch (sess.cipher.suite) {
-            .ecc => {
-                sess.cipher.suite.ecc = try Cipher.EllipticCurve.unpackKeyExchange(buffer);
-            },
+    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !ServerKeyExchange {
+        switch (ctx.cipher.suite) {
+            .ecc => try Cipher.EllipticCurve.unpackKeyExchange(buffer, ctx),
             else => unreachable,
         }
         return .{
             .buffer = buffer,
-            .cipher = &sess.cipher,
+            .cipher = &ctx.cipher,
         };
     }
 };
 
 pub const ServerHelloDone = struct {
     buffer: []const u8,
-    session: *State,
+    session: *ConnCtx,
 
-    pub fn unpack(buffer: []const u8, sess: *State) !ServerHelloDone {
+    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !ServerHelloDone {
         return .{
             .buffer = buffer,
             .session = sess,
@@ -256,9 +241,9 @@ pub const ServerHelloDone = struct {
 /// Certs
 pub const Certificate = struct {
     buffer: []const u8,
-    session: *State,
+    session: *ConnCtx,
 
-    pub fn unpack(buffer: []const u8, sess: *State) !Certificate {
+    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !Certificate {
         return .{
             .buffer = buffer,
             .session = sess,
@@ -268,9 +253,9 @@ pub const Certificate = struct {
 
 pub const CertificateRequest = struct {
     buffer: []const u8,
-    session: *State,
+    session: *ConnCtx,
 
-    pub fn unpack(buffer: []const u8, sess: *State) !CertificateRequest {
+    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !CertificateRequest {
         return .{
             .buffer = buffer,
             .session = sess,
@@ -385,7 +370,7 @@ pub const Handshake = struct {
         return len + 4;
     }
 
-    pub fn unpack(buffer: []const u8, sess: *State) !Handshake {
+    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !Handshake {
         const hs_type = try Type.fromByte(buffer[0]);
         const hsbuf = buffer[4..];
         return .{

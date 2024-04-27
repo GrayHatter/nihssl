@@ -1,4 +1,7 @@
 const std = @import("std");
+const ConnCtx = @import("context.zig");
+
+pub const X25519 = std.crypto.dh.X25519;
 
 const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
@@ -10,7 +13,7 @@ suite: union(enum) {
     ecc: EllipticCurve,
 } = .{ .invalid = {} },
 
-pub const Suites = enum(u16) {
+pub const UnsupportedSuites = enum(u16) {
     TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA = 0x0013,
     TLS_DHE_DSS_WITH_AES_128_CBC_SHA = 0x0032,
     TLS_DHE_DSS_WITH_AES_128_CBC_SHA256 = 0x0040,
@@ -39,19 +42,23 @@ pub const Suites = enum(u16) {
     TLS_DH_anon_WITH_AES_256_CBC_SHA = 0x003A,
     TLS_DH_anon_WITH_AES_256_CBC_SHA256 = 0x006D,
     TLS_DH_anon_WITH_RC4_128_MD5 = 0x0018,
-    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
+    // Planned to implement
     TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAC,
-    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA8,
     TLS_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAB,
     TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE,
+};
+
+pub const Suites = enum(u16) {
+    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
+    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA8,
 
     pub fn fromInt(s: u16) Suites {
         return switch (s) {
             0xCCA9 => .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-            0xCCAC => .TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256,
             0xCCA8 => .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-            0xCCAB => .TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-            0xCCAE => .TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAC => .TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAB => .TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAE => .TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256,
             else => unreachable,
         };
     }
@@ -60,8 +67,9 @@ pub const Suites = enum(u16) {
 pub const EllipticCurve = struct {
     curve: Curves = .{ .invalid = {} },
 
-    clt_key_mat: ?std.crypto.dh.X25519.KeyPair = null,
-    srv_key_mat: ?std.crypto.dh.X25519.KeyPair = null,
+    srv_material: ?X25519.KeyPair = undefined,
+    cli_material: ?X25519.KeyPair = null,
+    premaster: [X25519.shared_length]u8 = [_]u8{0} ** X25519.shared_length,
 
     pub const Curves = union(CurveType) {
         invalid: void,
@@ -88,11 +96,14 @@ pub const EllipticCurve = struct {
     pub const ExplicitChar2 = struct {};
     pub const NamedCurve = struct {};
 
-    pub fn init() EllipticCurve {
-        return .{};
+    /// srv is copied, and will not zero any arguments
+    pub fn init(srv: [X25519.public_length]u8) !EllipticCurve {
+        return .{
+            .srv_material = try X25519.KeyPair.create(srv),
+        };
     }
 
-    fn packNamedCurve(_: EllipticCurve, buffer: []u8) !usize {
+    fn packNamed(_: EllipticCurve, buffer: []u8) !usize {
         var fba = fixedBufferStream(buffer);
         const w = fba.writer().any();
 
@@ -120,26 +131,39 @@ pub const EllipticCurve = struct {
 
     pub fn packKeyExchange(ecc: EllipticCurve, buffer: []u8) !usize {
         return switch (ecc.curve) {
-            .named_curve => try ecc.packNamedCurve(buffer),
-            else => unreachable,
+            .named_curve => try ecc.packNamed(buffer),
+            // LOL sorry future me!
+            else => return try ecc.packNamed(buffer),
         };
     }
 
-    pub fn unpackKeyExchange(buffer: []const u8) !EllipticCurve {
+    fn unpackNamed(buffer: []const u8, ctx: *ConnCtx) !void {
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
+        const name = try r.readInt(u16, .big);
+        if (name != 0x001d) return error.UnknownCurveName;
+        if (ctx.cipher.suite.ecc.cli_material == null) unreachable;
+        const our_seckey = ctx.cipher.suite.ecc.cli_material.?.secret_key;
+        ctx.cipher.suite.ecc.srv_material = undefined;
+        const peer_key = &ctx.cipher.suite.ecc.srv_material.?.public_key;
+        try r.readNoEof(peer_key);
+
+        ctx.cipher.suite.ecc.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
+
+        // TODO verify signature
+
+    }
+
+    pub fn unpackKeyExchange(buffer: []const u8, ctx: *ConnCtx) !void {
+        if (ctx.cipher.suite != .ecc) unreachable;
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
 
         const curve_type = try CurveType.fromByte(try r.readByte());
-        //print("named curve {} {}\n", .{ try r.readByte(), try r.readByte() });
-        //print("full buffer {any}\n", .{buffer[0..4]});
-        //print("full buffer {any}\n", .{buffer[4..][0..32]});
-        //print("full buffer {any}\n", .{buffer[36..]});
-        return .{
-            .curve = switch (curve_type) {
-                .named_curve => .{ .named_curve = .{} },
-                else => return error.UnsupportedCurve,
-            },
-        };
+        switch (curve_type) {
+            .named_curve => try unpackNamed(buffer[1..], ctx),
+            else => return error.UnsupportedCurve,
+        }
     }
 };
 

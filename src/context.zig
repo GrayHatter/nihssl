@@ -11,9 +11,11 @@ const MACAlgorithm = root.MACAlgorithm;
 const CompressionMethod = root.CompressionMethod;
 const SessionID = root.SessionID;
 
-pub const State = @This();
+pub const ConnCtx = @This();
 
 cipher: Cipher = .{},
+our_random: [32]u8 = [_]u8{0} ** 32,
+peer_random: [32]u8 = [_]u8{0} ** 32,
 session_id: ?SessionID = null,
 entity: ConnectionEnd = .{},
 prf_algorithm: PRFAlgorithm = .{},
