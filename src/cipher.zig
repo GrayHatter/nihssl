@@ -6,12 +6,35 @@ pub const X25519 = std.crypto.dh.X25519;
 const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
 
+//const cipherT = std.crypto.tls.ApplicationCipherT;
+const hscipherT = std.crypto.tls.HandshakeCipherT;
+const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
+const chacha_t = hscipherT(ChaCha20Poly1305, std.crypto.hash.sha2.Sha256);
+const hkdfExpandLabel = std.crypto.tls.hkdfExpandLabel;
+
+const ChaCha20 = ChaCha20Poly1305;
+const Sha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+
 pub const Cipher = @This();
 
 suite: union(enum) {
     invalid: void,
     ecc: EllipticCurve,
 } = .{ .invalid = {} },
+sequence: u72 = 0, // this is chacha20 specific :/
+
+pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
+    return struct {
+        premaster: [X25519.shared_length]u8 = [_]u8{0} ** X25519.shared_length,
+        master: [48]u8 = undefined,
+        cli_mac: [hmac.mac_length]u8,
+        srv_mac: [hmac.mac_length]u8,
+        cli_key: [enc.key_length]u8,
+        srv_key: [enc.key_length]u8,
+        cli_iv: [enc.nonce_length]u8,
+        srv_iv: [enc.nonce_length]u8,
+    };
+}
 
 pub const UnsupportedSuites = enum(u16) {
     TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA = 0x0013,
@@ -67,9 +90,10 @@ pub const Suites = enum(u16) {
 pub const EllipticCurve = struct {
     curve: Curves = .{ .invalid = {} },
 
-    srv_material: ?X25519.KeyPair = undefined,
-    cli_material: ?X25519.KeyPair = null,
-    premaster: [X25519.shared_length]u8 = [_]u8{0} ** X25519.shared_length,
+    srv_dh: ?X25519.KeyPair = undefined,
+    cli_dh: ?X25519.KeyPair = null,
+
+    material: Material(ChaCha20, Sha256) = undefined,
 
     pub const Curves = union(CurveType) {
         invalid: void,
@@ -137,21 +161,74 @@ pub const EllipticCurve = struct {
         };
     }
 
+    fn buildKeyMaterial(ctx: *ConnCtx) !Material(ChaCha20, Sha256) {
+        var material: Material(ChaCha20, Sha256) = ctx.cipher.suite.ecc.material;
+
+        const our_seckey = ctx.cipher.suite.ecc.cli_dh.?.secret_key;
+        const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
+        material.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
+
+        const seed = "master secret" ++ ctx.our_random ++ ctx.peer_random.?;
+        //var left = std.crypto.auth.hmac.sha2.HmacSha256.init(ctx.cipher.suite.ecc.premaster);
+
+        var pre_left: [32]u8 = undefined;
+        var pre_right: [32]u8 = undefined;
+        Sha256.create(&pre_left, seed, &material.premaster);
+        Sha256.create(&pre_right, &pre_left, &material.premaster);
+        var left: [32]u8 = undefined;
+        var right: [32]u8 = undefined;
+        Sha256.create(&left, pre_left ++ seed, &material.premaster);
+        Sha256.create(&right, pre_right ++ seed, &material.premaster);
+
+        material.master = left ++ right[0..16].*;
+
+        {
+            const key_seed = "key expansion" ++ ctx.peer_random.? ++ ctx.our_random;
+            var first: [32]u8 = undefined;
+            Sha256.create(&first, key_seed, &material.master);
+            var second: [32]u8 = undefined;
+            Sha256.create(&second, &first, &material.master);
+            var third: [32]u8 = undefined;
+            Sha256.create(&third, &second, &material.master);
+            var forth: [32]u8 = undefined;
+            Sha256.create(&forth, &third, &material.master);
+            var fifth: [32]u8 = undefined;
+            Sha256.create(&fifth, &forth, &material.master);
+
+            var p_first: [32]u8 = undefined;
+            Sha256.create(&p_first, first ++ key_seed, &material.master);
+            var p_second: [32]u8 = undefined;
+            Sha256.create(&p_second, second ++ key_seed, &material.master);
+            var p_third: [32]u8 = undefined;
+            Sha256.create(&p_third, third ++ key_seed, &material.master);
+            var p_forth: [32]u8 = undefined;
+            Sha256.create(&p_forth, forth ++ key_seed, &material.master);
+            var p_fifth: [32]u8 = undefined;
+            Sha256.create(&p_fifth, fifth ++ key_seed, &material.master);
+            const final = p_first ++ p_second ++ p_third ++ p_forth ++ p_fifth;
+
+            material.cli_mac = final[0..][0..32].*;
+            material.cli_mac = final[32..][0..32].*;
+            material.cli_key = final[64..][0..32].*;
+            material.srv_key = final[96..][0..32].*;
+            material.srv_iv = final[128..][0..12].*;
+            material.srv_iv = final[140..][0..12].*;
+        }
+        return material;
+    }
+
     fn unpackNamed(buffer: []const u8, ctx: *ConnCtx) !void {
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
         const name = try r.readInt(u16, .big);
         if (name != 0x001d) return error.UnknownCurveName;
-        if (ctx.cipher.suite.ecc.cli_material == null) unreachable;
-        const our_seckey = ctx.cipher.suite.ecc.cli_material.?.secret_key;
-        ctx.cipher.suite.ecc.srv_material = undefined;
-        const peer_key = &ctx.cipher.suite.ecc.srv_material.?.public_key;
+        ctx.cipher.suite.ecc.srv_dh = undefined;
+        const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
         try r.readNoEof(peer_key);
-
-        ctx.cipher.suite.ecc.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
 
         // TODO verify signature
 
+        ctx.cipher.suite.ecc.material = try buildKeyMaterial(ctx);
     }
 
     pub fn unpackKeyExchange(buffer: []const u8, ctx: *ConnCtx) !void {

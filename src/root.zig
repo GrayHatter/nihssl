@@ -3,6 +3,7 @@ const net = std.net;
 const testing = std.testing;
 const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
+const asBytes = std.mem.asBytes;
 
 const TESTING_IP = "127.0.0.1";
 const TESTING_PORT = 4433;
@@ -42,13 +43,16 @@ const TLSRecord = struct {
         application_data: []const u8,
     },
 
-    pub fn packFragment(record: TLSRecord, buffer: []u8) !usize {
-        var fba = fixedBufferStream(buffer);
-        const len = switch (record.kind) {
-            .handshake => |ch| try ch.pack(buffer[5..]),
-            .change_cipher_spec => ChangeCipherSpec.pack(buffer[5..]),
+    pub fn packFragment(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
+        return switch (record.kind) {
+            .handshake => |ch| try ch.pack(buffer, ctx),
+            .change_cipher_spec => ChangeCipherSpec.pack(buffer),
             else => unreachable,
         };
+    }
+
+    fn packHeader(record: TLSRecord, buffer: []u8, len: usize) !usize {
+        var fba = fixedBufferStream(buffer);
         var w = fba.writer().any();
         try w.writeByte(@intFromEnum(record.kind));
         try w.writeByte(record.version.major);
@@ -57,8 +61,29 @@ const TLSRecord = struct {
         return len + 5;
     }
 
-    pub fn pack(record: TLSRecord, buffer: []u8) !usize {
-        return record.packFragment(buffer);
+    pub fn pack(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
+        const len = try record.packFragment(buffer[5..], ctx);
+        return record.packHeader(buffer, len);
+    }
+
+    pub fn encrypt(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
+        var clear_buffer: [0x1000]u8 = undefined;
+        const empty: [0]u8 = undefined;
+        var iv: [12]u8 = buffer[5..][0..12].*;
+        for (&iv, ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, src, seq|
+            dst.* = src ^ seq;
+        const encrypted_body = buffer[5 + 12 ..];
+        const len = try record.packFragment(&clear_buffer, ctx);
+
+        std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
+            encrypted_body[0..len],
+            encrypted_body[len..][0..16],
+            clear_buffer[0..len],
+            &empty,
+            iv,
+            ctx.cipher.suite.ecc.material.cli_key,
+        );
+        return try record.packHeader(buffer, len + 16);
     }
 
     pub fn unpackFragment(buffer: []const u8, sess: *ConnCtx) !TLSRecord {
@@ -121,39 +146,35 @@ pub const ChangeCipherSpec = struct {
 
 test "Handshake ClientHello" {
     var buffer = [_]u8{0} ** 0x400;
-    var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
-    var rand = [_]u8{0} ** 32;
-    csprng.fill(&rand);
-    const client_hello = Handshake.ClientHello.init(rand);
+
+    var ctx = ConnCtx.initClient(std.testing.allocator);
+    const client_hello = Handshake.ClientHello.init(ctx);
     const record = TLSRecord{
         .kind = .{
             .handshake = try Handshake.Handshake.wrap(client_hello),
         },
     };
 
-    const len = try record.pack(&buffer);
+    const len = try record.pack(&buffer, &ctx);
     _ = len;
 }
 
 fn startHandshake(conn: std.net.Stream) !ConnCtx {
     var buffer = [_]u8{0} ** 0x1000;
-    var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
-    var rand = [_]u8{0} ** 32;
-    csprng.fill(&rand);
-    const client_hello = Handshake.ClientHello.init(rand);
+    var ctx = ConnCtx.initClient(std.testing.allocator);
+    const client_hello = Handshake.ClientHello.init(ctx);
     const record = TLSRecord{
         .kind = .{
             .handshake = try Handshake.Handshake.wrap(client_hello),
         },
     };
 
-    const len = try record.pack(&buffer);
+    const len = try record.pack(&buffer, &ctx);
     const dout = try conn.write(buffer[0..len]);
+    try ctx.handshake_record.appendSlice(buffer[5 .. len - 5]);
     if (false) print("data count {}\n", .{dout});
     if (false) print("data out {any}\n", .{buffer[0..len]});
-    return .{
-        .our_random = client_hello.random,
-    };
+    return ctx;
 }
 
 /// Forgive me, I'm tired
@@ -174,6 +195,9 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
         if (false) print("server block\n{any}\n", .{next_block});
         const tlsr = try TLSRecord.unpack(next_block, ctx);
         if (false) print("mock {}\n", .{tlsr.length});
+        if (next_block.len > 6)
+            try ctx.handshake_record.appendSlice(next_block[5..][0..tlsr.length]);
+
         next_block = next_block[tlsr.length + 5 ..];
 
         switch (tlsr.kind) {
@@ -182,12 +206,11 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
                 switch (hs.body) {
                     .server_hello => |hello| {
                         print("server hello {}\n", .{@TypeOf(hello)});
-                        print("srv selected suite {any}\n", .{hello.cipher});
-                        print("test selected suite {any}\n", .{.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256});
+                        print("srv selected suite {any}\n", .{ctx.cipher});
                         if (ctx.cipher.suite != .ecc) {
                             return error.UnexpectedCipherSuite;
                         }
-                        ctx.cipher.suite.ecc.cli_material = try Cipher.X25519.KeyPair.create(null);
+                        ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
                     },
                     .certificate => |cert| {
                         print("server cert {}\n", .{@TypeOf(cert)});
@@ -218,8 +241,9 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
         },
     };
 
-    const cke_len = try cke_record.pack(&buffer);
+    const cke_len = try cke_record.pack(&buffer, ctx);
     try std.testing.expectEqual(42, cke_len);
+    try ctx.handshake_record.appendSlice(buffer[5 .. cke_len - 5]);
     print("CKE: {any}\n", .{buffer[0..cke_len]});
     const ckeout = try conn.write(buffer[0..cke_len]);
     if (true) print("cke delivered, {}\n", .{ckeout});
@@ -235,7 +259,7 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     const ccs_record = TLSRecord{
         .kind = .{ .change_cipher_spec = {} },
     };
-    const ccs_len = try ccs_record.pack(&buffer);
+    const ccs_len = try ccs_record.pack(&buffer, ctx);
     const ccsout = try conn.write(buffer[0..ccs_len]);
     try std.testing.expectEqual(6, ccsout);
 
@@ -246,7 +270,7 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
             .handshake = try Handshake.Handshake.wrap(fin),
         },
     };
-    const fin_len = try fin_record.pack(&buffer);
+    const fin_len = try fin_record.encrypt(&buffer, ctx);
     print("fin: {any}\n", .{buffer[0..fin_len]});
     const finout = try conn.write(buffer[0..fin_len]);
     if (true) print("fin delivered, {}\n", .{finout});

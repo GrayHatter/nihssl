@@ -59,13 +59,12 @@ pub const ClientHello = struct {
 
     pub const length = @sizeOf(ClientHello);
 
-    pub fn init(rand: Random) ClientHello {
+    pub fn init(ctx: ConnCtx) ClientHello {
         var hello = ClientHello{
-            .random = rand,
+            .random = ctx.our_random,
             .session_id = [_]u8{0} ** 32,
         };
 
-        //csprng.fill(&hello.random.random_bytes);
         csprng.fill(&hello.session_id);
         return hello;
     }
@@ -130,18 +129,25 @@ pub const ClientKeyExchange = struct {
 };
 
 pub const Finished = struct {
-    pub fn pack(_: Finished, buffer: []u8) !usize {
+    pub fn pack(buffer: []u8, ctx: *const ConnCtx) !usize {
         var fba = fixedBufferStream(buffer);
         var w = fba.writer().any();
 
-        const iv = [0x10]u8{
-            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
-        };
-        try w.writeAll(&iv);
-        const encrypted = [_]u8{0} ** 0x30;
+        var sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&ctx.cipher.suite.ecc.material.master);
+        sha.update("client finished");
+        sha.update(ctx.handshake_record.items);
+        var verify: [32]u8 = undefined;
+        sha.final(&verify);
 
-        try w.writeAll(&encrypted);
+        sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&ctx.cipher.suite.ecc.material.master);
+        sha.update(&verify);
+        sha.update("client finished");
+        sha.update(ctx.handshake_record.items);
+        sha.final(&verify);
+
+        defer ctx.handshake_record.deinit();
+
+        try w.writeAll(&verify);
         return 0x40;
     }
 };
@@ -154,7 +160,7 @@ pub const ServerHello = struct {
     compression: Compression,
     extensions: []const Extension,
 
-    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !ServerHello {
+    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !void {
         print("buffer:: {any}\n", .{buffer});
         var fba = fixedBufferStream(buffer);
         const r = fba.reader().any();
@@ -163,8 +169,10 @@ pub const ServerHello = struct {
             .major = try r.readByte(),
             .minor = try r.readByte(),
         };
-        var random: [32]u8 = undefined;
-        try r.readNoEof(&random);
+        std.debug.assert(version.major == 3 and version.minor == 3);
+
+        ctx.peer_random = undefined;
+        try r.readNoEof(&ctx.peer_random.?);
 
         const session_size = try r.readByte();
         var session_id: [32]u8 = [_]u8{0} ** 32;
@@ -195,13 +203,6 @@ pub const ServerHello = struct {
             error.EndOfStream => if (false) print("SrvHelo no extensions\n", .{}),
             else => return err,
         }
-
-        return .{
-            .version = version,
-            .random = random,
-            .compression = .null,
-            .extensions = &[0]Extension{},
-        };
     }
 };
 
@@ -320,7 +321,7 @@ fn handshakeFromHeader(kind: Type) type {
 const Handshakes = union(Type) {
     hello_request: void,
     client_hello: ClientHello,
-    server_hello: ServerHello,
+    server_hello: void,
     certificate: Certificate,
     server_key_exchange: ServerKeyExchange,
     certificate_request: CertificateRequest,
@@ -354,13 +355,13 @@ pub const Handshake = struct {
         };
     }
 
-    pub fn pack(hs: Handshake, buffer: []u8) !usize {
+    pub fn pack(hs: Handshake, buffer: []u8, ctx: *ConnCtx) !usize {
         var fba = fixedBufferStream(buffer);
         var w = fba.writer().any();
         const len = switch (hs.body) {
             .client_hello => |ch| try ch.pack(buffer[4..]),
             .client_key_exchange => |cke| try cke.pack(buffer[4..]),
-            .finished => |fin| try fin.pack(buffer[4..]),
+            .finished => try Finished.pack(buffer[4..], ctx),
             else => unreachable,
         };
         std.debug.assert(len < std.math.maxInt(u24));
