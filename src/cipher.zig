@@ -36,7 +36,7 @@ pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
     };
 }
 
-pub const UnsupportedSuites = enum(u16) {
+pub const Suites = enum(u16) {
     TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA = 0x0013,
     TLS_DHE_DSS_WITH_AES_128_CBC_SHA = 0x0032,
     TLS_DHE_DSS_WITH_AES_128_CBC_SHA256 = 0x0040,
@@ -69,13 +69,23 @@ pub const UnsupportedSuites = enum(u16) {
     TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAC,
     TLS_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAB,
     TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE,
-};
 
-pub const Suites = enum(u16) {
+    ///Current Supported
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
     TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA8,
 
     pub fn fromInt(s: u16) Suites {
+        return switch (s) {
+            0xCCA9 => .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            0xCCA8 => .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAC => .TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAB => .TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            //0xCCAE => .TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256,
+            else => |t| @enumFromInt(t),
+        };
+    }
+
+    pub fn unsupported(s: u16) Suites {
         return switch (s) {
             0xCCA9 => .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
             0xCCA8 => .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
@@ -215,7 +225,6 @@ pub const EllipticCurve = struct {
             material.cli_iv = final[64..][0..12].*;
             material.srv_iv = final[72..][0..12].*;
         }
-        print("material {}\n", .{material});
         return material;
     }
 

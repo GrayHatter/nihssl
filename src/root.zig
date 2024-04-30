@@ -71,7 +71,7 @@ const TLSRecord = struct {
         const len = try record.packFragment(&clear_buffer, ctx);
 
         const empty: [0]u8 = undefined;
-        print("material iv {any}\n", .{ctx.cipher.suite.ecc.material.cli_iv});
+        //print("material iv {any}\n", .{ctx.cipher.suite.ecc.material.cli_iv});
         //for (buffer[5..][0..12], ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, iv, seq|
         //    dst.* = iv ^ seq;
         const encrypted_body = buffer[5..];
@@ -84,9 +84,9 @@ const TLSRecord = struct {
             ctx.cipher.suite.ecc.material.cli_iv,
             ctx.cipher.suite.ecc.material.cli_key,
         );
-        print("biv {any}\n", .{buffer[5..][0..12]});
-        print("encrypted {any}\n", .{encrypted_body[0..len]});
-        print("tag {any}\n", .{encrypted_body[len .. len + 16]});
+        //print("biv {any}\n", .{buffer[5..][0..12]});
+        //print("encrypted {any}\n", .{encrypted_body[0..len]});
+        //print("tag {any}\n", .{encrypted_body[len .. len + 16]});
 
         return try record.packHeader(buffer, len);
     }
@@ -210,24 +210,24 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
             .handshake => |hs| {
                 switch (hs.body) {
                     .server_hello => |hello| {
-                        print("server hello {}\n", .{@TypeOf(hello)});
-                        print("srv selected suite {any}\n", .{ctx.cipher});
+                        if (false) print("server hello {}\n", .{@TypeOf(hello)});
+                        if (false) print("srv selected suite {any}\n", .{ctx.cipher});
                         if (ctx.cipher.suite != .ecc) {
                             return error.UnexpectedCipherSuite;
                         }
                         ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
                     },
                     .certificate => |cert| {
-                        print("server cert {}\n", .{@TypeOf(cert)});
+                        if (false) print("server cert {}\n", .{@TypeOf(cert)});
                     },
                     .server_key_exchange => |keyex| {
-                        print("server keyex {}\n", .{@TypeOf(keyex)});
+                        if (false) print("server keyex {}\n", .{@TypeOf(keyex)});
                     },
                     .certificate_request => |req| {
-                        print("server req {}\n", .{@TypeOf(req)});
+                        if (false) print("server req {}\n", .{@TypeOf(req)});
                     },
                     .server_hello_done => |done| {
-                        print("server done {}\n", .{@TypeOf(done)});
+                        if (false) print("server done {}\n", .{@TypeOf(done)});
                     },
                     else => return error.UnexpectedHandshake,
                 }
@@ -249,16 +249,16 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     const cke_len = try cke_record.pack(&buffer, ctx);
     try std.testing.expectEqual(42, cke_len);
     try ctx.handshake_record.appendSlice(buffer[5 .. cke_len - 5]);
-    print("CKE: {any}\n", .{buffer[0..cke_len]});
+    if (false) print("CKE: {any}\n", .{buffer[0..cke_len]});
     const ckeout = try conn.write(buffer[0..cke_len]);
-    if (true) print("cke delivered, {}\n", .{ckeout});
+    if (false) print("cke delivered, {}\n", .{ckeout});
 
     var r_buf: [0x1000]u8 = undefined;
     if (false) { // check for alerts
         const num = try conn.read(&r_buf);
-        print("sin: {any}\n", .{r_buf[0..num]});
+        if (false) print("sin: {any}\n", .{r_buf[0..num]});
         const sin = try TLSRecord.unpack(r_buf[0..num], ctx);
-        print("server thing {}\n", .{sin});
+        if (false) print("server thing {}\n", .{sin});
     }
 
     const ccs_record = TLSRecord{
@@ -276,14 +276,14 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
         },
     };
     const fin_len = try fin_record.encrypt(&buffer, ctx);
-    print("fin: {any}\n", .{buffer[0..fin_len]});
+    if (false) print("fin: {any}\n", .{buffer[0..fin_len]});
     const finout = try conn.write(buffer[0..fin_len]);
-    if (true) print("fin delivered, {}\n", .{finout});
+    if (false) print("fin delivered, {}\n", .{finout});
 
     const num2 = try conn.read(&r_buf);
-    print("sin: {any}\n", .{r_buf[0..num2]});
+    if (false) print("sin: {any}\n", .{r_buf[0..num2]});
     const sin2 = try TLSRecord.unpack(r_buf[0..num2], ctx);
-    print("server thing {}\n", .{sin2});
+    if (false) print("server thing {}\n", .{sin2});
 }
 
 fn fullHandshake(conn: std.net.Stream) !void {
@@ -292,6 +292,62 @@ fn fullHandshake(conn: std.net.Stream) !void {
     const l = try readServer(conn, &server);
     try buildServer(server[0..l], &ctx);
     try completeClient(conn, &ctx);
+}
+
+fn probe(conn: std.net.Stream, target: Cipher.Suites) !void {
+    var buffer = [_]u8{0} ** 0x1000;
+    var ctx = ConnCtx.initClient(std.testing.allocator);
+    var client_hello = Handshake.ClientHello.init(ctx);
+    client_hello.ciphers = &[1]Cipher.Suites{target};
+    const record = TLSRecord{
+        .kind = .{
+            .handshake = try Handshake.Handshake.wrap(client_hello),
+        },
+    };
+
+    const len = try record.pack(&buffer, &ctx);
+    _ = try conn.write(buffer[0..len]);
+
+    var server: [0x1000]u8 = undefined;
+    const s_read = try conn.read(&server);
+    if (s_read == 0) return error.InvalidSHello;
+
+    const server_msg = server[0..s_read];
+    if (s_read <= 7) {
+        print("suite {} is unsupported\n", .{target});
+        return;
+    }
+    print("FOUND {}\n", .{target});
+
+    const tlsr = try TLSRecord.unpack(server_msg, &ctx);
+
+    switch (tlsr.kind) {
+        .change_cipher_spec, .alert, .application_data => return error.UnexpectedResponse,
+        .handshake => |hs| {
+            switch (hs.body) {
+                else => return,
+            }
+        },
+    }
+}
+
+test "probe" {
+    if (true) return error.SkipZigTest;
+    for (
+        [_][]const u8{ "127.0.0.1", "144.126.209.12" },
+        [_]u16{ 4433, 443 },
+    ) |IP, PORT| {
+        print("{s} :: {}\n", .{ IP, PORT });
+        for (std.meta.tags(Cipher.Suites)) |target| {
+            const addr = net.Address.resolveIp(IP, PORT) catch |err| {
+                print("unable to resolve address because {}\n", .{err});
+                return err;
+            };
+            const conn = try net.tcpConnectToAddress(addr);
+            defer conn.close();
+            try probe(conn, target);
+        }
+    }
 }
 
 test "tls" {

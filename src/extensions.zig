@@ -67,9 +67,12 @@ pub const SupportedGroups = struct {
 
         const supported = [_]u16{
             0x001d,
+            0x0017,
+            0x0018,
+            0x0019,
         };
 
-        try w.writeInt(u16, 4, .big);
+        try w.writeInt(u16, 2 + supported.len * 2, .big);
         try w.writeInt(u16, supported.len * 2, .big);
         for (supported) |each| try w.writeInt(u16, each, .big);
 
@@ -113,29 +116,10 @@ const SignatureAlgos = enum(u8) {
     // 224-255  Private Use
 };
 
-//const HashAlgorithm = enum(u8) {
-//    none = 0,
-//    md5 = 1,
-//    sha1 = 2,
-//    sha224 = 3,
-//    sha256 = 4,
-//    sha384 = 5,
-//
-//    sha512 = 6,
-//};
-//
-//const SignatureAlgorithm = enum(u8) {
-//    anonymous = 0,
-//    rsa = 1,
-//    dsa = 2,
-//    ecdsa = 3,
-//};
-//
-//const SignatureAndHashAlgorithm = struct {
-//    hash: HashAlgorithm,
-//    signature: SignatureAlgorithm,
-//};
-//
+const SignatureAndHashAlgorithm = struct {
+    hash: HashAlgos,
+    signature: SignatureAlgos,
+};
 
 pub const SignatureAlgorithms = struct {
     const EXT_TYPE: u16 = 0x000D;
@@ -152,10 +136,35 @@ pub const SignatureAlgorithms = struct {
         //HashAlgorithm; enum { none(0), md5(1), sha1(2), sha224(3), sha256(4), sha384(5), sha512(6), }
         //SignatureAlgorithm; enum { anonymous(0), rsa(1), dsa(2), ecdsa(3), }
 
+        const testable = [_]u16{
+            0x0101,
+            0x0102,
+            0x0201,
+            0x0202,
+            0x0203,
+            0x0204,
+            0x0205,
+            0x0301,
+            0x0302,
+            0x0303,
+            0x0304,
+            0x0305,
+            0x0401,
+            0x0402,
+            0x0403,
+            0x0404,
+            0x0405,
+            0x0501,
+            0x0502,
+            0x0503,
+            0x0504,
+            0x0505,
+        };
+        _ = testable;
+
         const supported = [_]u16{
             0x0401,
             0x0403,
-            //0x0007,
         };
 
         try w.writeInt(u16, supported.len * 2 + 2, .big);
