@@ -190,10 +190,10 @@ pub const EllipticCurve = struct {
             Sha256.create(&second, &first, &material.master);
             var third: [32]u8 = undefined;
             Sha256.create(&third, &second, &material.master);
-            var forth: [32]u8 = undefined;
-            Sha256.create(&forth, &third, &material.master);
-            var fifth: [32]u8 = undefined;
-            Sha256.create(&fifth, &forth, &material.master);
+            //var forth: [32]u8 = undefined;
+            //Sha256.create(&forth, &third, &material.master);
+            //var fifth: [32]u8 = undefined;
+            //Sha256.create(&fifth, &forth, &material.master);
 
             var p_first: [32]u8 = undefined;
             Sha256.create(&p_first, first ++ key_seed, &material.master);
@@ -201,19 +201,21 @@ pub const EllipticCurve = struct {
             Sha256.create(&p_second, second ++ key_seed, &material.master);
             var p_third: [32]u8 = undefined;
             Sha256.create(&p_third, third ++ key_seed, &material.master);
-            var p_forth: [32]u8 = undefined;
-            Sha256.create(&p_forth, forth ++ key_seed, &material.master);
-            var p_fifth: [32]u8 = undefined;
-            Sha256.create(&p_fifth, fifth ++ key_seed, &material.master);
-            const final = p_first ++ p_second ++ p_third ++ p_forth ++ p_fifth;
+            //var p_forth: [32]u8 = undefined;
+            //Sha256.create(&p_forth, forth ++ key_seed, &material.master);
+            //var p_fifth: [32]u8 = undefined;
+            //Sha256.create(&p_fifth, fifth ++ key_seed, &material.master);
+            //const final = p_first ++ p_second ++ p_third ++ p_forth ++ p_fifth;
+            const final = p_first ++ p_second ++ p_third;
 
-            material.cli_mac = final[0..][0..32].*;
-            material.cli_mac = final[32..][0..32].*;
-            material.cli_key = final[64..][0..32].*;
-            material.srv_key = final[96..][0..32].*;
-            material.srv_iv = final[128..][0..12].*;
-            material.srv_iv = final[140..][0..12].*;
+            //material.cli_mac = final[0..][0..32].*;
+            //material.cli_mac = final[32..][0..32].*;
+            material.cli_key = final[0..][0..32].*;
+            material.srv_key = final[32..][0..32].*;
+            material.cli_iv = final[64..][0..12].*;
+            material.srv_iv = final[72..][0..12].*;
         }
+        print("material {}\n", .{material});
         return material;
     }
 

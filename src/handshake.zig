@@ -148,7 +148,7 @@ pub const Finished = struct {
         defer ctx.handshake_record.deinit();
 
         try w.writeAll(&verify);
-        return 0x40;
+        return 0x20;
     }
 };
 

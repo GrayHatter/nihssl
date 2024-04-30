@@ -68,22 +68,27 @@ const TLSRecord = struct {
 
     pub fn encrypt(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
         var clear_buffer: [0x1000]u8 = undefined;
-        const empty: [0]u8 = undefined;
-        var iv: [12]u8 = buffer[5..][0..12].*;
-        for (&iv, ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, src, seq|
-            dst.* = src ^ seq;
-        const encrypted_body = buffer[5 + 12 ..];
         const len = try record.packFragment(&clear_buffer, ctx);
+
+        const empty: [0]u8 = undefined;
+        print("material iv {any}\n", .{ctx.cipher.suite.ecc.material.cli_iv});
+        //for (buffer[5..][0..12], ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, iv, seq|
+        //    dst.* = iv ^ seq;
+        const encrypted_body = buffer[5..];
 
         std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
             encrypted_body[0..len],
             encrypted_body[len..][0..16],
             clear_buffer[0..len],
             &empty,
-            iv,
+            ctx.cipher.suite.ecc.material.cli_iv,
             ctx.cipher.suite.ecc.material.cli_key,
         );
-        return try record.packHeader(buffer, len + 16);
+        print("biv {any}\n", .{buffer[5..][0..12]});
+        print("encrypted {any}\n", .{encrypted_body[0..len]});
+        print("tag {any}\n", .{encrypted_body[len .. len + 16]});
+
+        return try record.packHeader(buffer, len);
     }
 
     pub fn unpackFragment(buffer: []const u8, sess: *ConnCtx) !TLSRecord {
