@@ -53,15 +53,15 @@ pub const ClientHello = struct {
     };
 
     pub const SupportedSuiteList = [_]Cipher.Suites{
-        Cipher.Suites.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        Cipher.Suites.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     };
 
     pub const length = @sizeOf(ClientHello);
 
     pub fn init(ctx: ConnCtx) ClientHello {
         var hello = ClientHello{
-            .random = ctx.our_random,
+            .random = ctx.cli_random.?,
             .session_id = [_]u8{0} ** 32,
         };
 
@@ -170,8 +170,8 @@ pub const ServerHello = struct {
         };
         std.debug.assert(version.major == 3 and version.minor == 3);
 
-        ctx.peer_random = undefined;
-        try r.readNoEof(&ctx.peer_random.?);
+        ctx.srv_random = undefined;
+        try r.readNoEof(&ctx.srv_random.?);
 
         const session_size = try r.readByte();
         var session_id: [32]u8 = [_]u8{0} ** 32;
@@ -187,6 +187,14 @@ pub const ServerHello = struct {
             .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
             => {
                 ctx.cipher.suite = .{ .ecc = undefined };
+            },
+            .TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+            .TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+            .TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+            .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+            .TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            => {
+                ctx.cipher.suite = .{ .aes = undefined };
             },
             //else => ctx.cipher.suite = .{ .ecc = undefined },
             else => unreachable,
@@ -217,7 +225,11 @@ pub const ServerKeyExchange = struct {
     /// Will modify sess with supplied
     pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !ServerKeyExchange {
         switch (ctx.cipher.suite) {
-            .ecc => try Cipher.EllipticCurve.unpackKeyExchange(buffer, ctx),
+            .ecc => {
+                ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
+                try Cipher.EllipticCurve.unpackKeyExchange(buffer, ctx);
+            },
+            .aes => try Cipher.AnyAES.unpackKeyExchange(buffer, ctx),
             else => unreachable,
         }
         return .{

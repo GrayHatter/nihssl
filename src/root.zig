@@ -164,10 +164,11 @@ test "Handshake ClientHello" {
     _ = len;
 }
 
-fn startHandshake(conn: std.net.Stream) !ConnCtx {
+fn startHandshakeCustomSuites(conn: std.net.Stream, suites: []const Cipher.Suites) !ConnCtx {
     var buffer = [_]u8{0} ** 0x1000;
     var ctx = ConnCtx.initClient(std.testing.allocator);
-    const client_hello = Handshake.ClientHello.init(ctx);
+    var client_hello = Handshake.ClientHello.init(ctx);
+    client_hello.ciphers = suites;
     const record = TLSRecord{
         .kind = .{
             .handshake = try Handshake.Handshake.wrap(client_hello),
@@ -180,6 +181,14 @@ fn startHandshake(conn: std.net.Stream) !ConnCtx {
     if (false) print("data count {}\n", .{dout});
     if (false) print("data out {any}\n", .{buffer[0..len]});
     return ctx;
+}
+
+fn startHandshake(conn: std.net.Stream) !ConnCtx {
+    return startHandshakeCustomSuites(conn, &[_]Cipher.Suites{
+        .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+    });
 }
 
 /// Forgive me, I'm tired
@@ -212,10 +221,9 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
                     .server_hello => |hello| {
                         if (false) print("server hello {}\n", .{@TypeOf(hello)});
                         if (false) print("srv selected suite {any}\n", .{ctx.cipher});
-                        if (ctx.cipher.suite != .ecc) {
-                            return error.UnexpectedCipherSuite;
-                        }
-                        ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
+                        //if (ctx.cipher.suite != .ecc) {
+                        //    return error.UnexpectedCipherSuite;
+                        //}
                     },
                     .certificate => |cert| {
                         if (false) print("server cert {}\n", .{@TypeOf(cert)});
@@ -351,6 +359,7 @@ test "probe" {
 }
 
 test "tls" {
+    if (false) return error.SkipZigTest;
     const addr = net.Address.resolveIp(TESTING_IP, TESTING_PORT) catch |err| {
         print("unable to resolve address because {}\n", .{err});
         return err;
@@ -361,6 +370,24 @@ test "tls" {
     var server: [0x1000]u8 = undefined;
     const l = try readServer(conn, &server);
     try buildServer(server[0..l], &ctx);
+    try completeClient(conn, &ctx);
+}
+
+test "cbc" {
+    const addr = net.Address.resolveIp(TESTING_IP, TESTING_PORT) catch |err| {
+        print("unable to resolve address because {}\n", .{err});
+        return err;
+    };
+    const conn = try net.tcpConnectToAddress(addr);
+
+    var ctx = try startHandshakeCustomSuites(conn, &[_]Cipher.Suites{
+        .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+    });
+    errdefer ctx.handshake_record.deinit();
+    var server: [0x1000]u8 = undefined;
+    const l = try readServer(conn, &server);
+    try buildServer(server[0..l], &ctx);
+    std.debug.assert(ctx.cipher.suite == .aes);
     try completeClient(conn, &ctx);
 }
 

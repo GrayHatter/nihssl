@@ -20,11 +20,19 @@ pub const Cipher = @This();
 suite: union(enum) {
     invalid: void,
     ecc: EllipticCurve,
+    aes: AnyAES,
 } = .{ .invalid = {} },
 sequence: u72 = 0, // this is chacha20 specific :/
 
 pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
     return struct {
+        pub const Self = @This();
+
+        //cli_random: [32]u8 = undefined,
+        //srv_random: [32]u8 = undefined,
+
+        srv_pub_key: [32]u8 = undefined,
+
         premaster: [X25519.shared_length]u8 = [_]u8{0} ** X25519.shared_length,
         master: [48]u8 = undefined,
         cli_mac: [hmac.mac_length]u8,
@@ -33,6 +41,21 @@ pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
         srv_key: [enc.key_length]u8,
         cli_iv: [enc.nonce_length]u8,
         srv_iv: [enc.nonce_length]u8,
+
+        pub fn build(self: *Self, key_material: []const u8) void {
+            var index: usize = 0;
+            self.cli_mac = key_material[index..][0..hmac.mac_length].*;
+            index += hmac.mac_length;
+            self.srv_mac = key_material[index..][0..hmac.mac_length].*;
+            index += hmac.mac_length;
+            self.cli_key = key_material[index..][0..enc.key_length].*;
+            index += enc.key_length;
+            self.srv_key = key_material[index..][0..enc.key_length].*;
+            index += enc.key_length;
+            self.cli_iv = key_material[index..][0..enc.nonce_length].*;
+            index += enc.nonce_length;
+            self.srv_iv = key_material[index..][0..enc.nonce_length].*;
+        }
     };
 }
 
@@ -96,6 +119,110 @@ pub const Suites = enum(u16) {
         };
     }
 };
+
+pub const AnyAES = struct {
+    material: Material(AES(CBC), Sha256),
+    /// srv is copied, and will not zero any arguments
+    pub fn init(srv: [X25519.public_length]u8) !EllipticCurve {
+        return .{
+            .srv_material = try X25519.KeyPair.create(srv),
+        };
+    }
+
+    fn packNamed(_: EllipticCurve, _: []u8) !usize {}
+    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(CBC), Sha256) {
+        var aes = &ctx.cipher.suite.aes;
+
+        //const our_seckey = ctx.cipher.suite.aes.material.cli_dh.?.secret_key;
+        //const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
+        //material.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
+
+        const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
+        //var left = std.crypto.auth.hmac.sha2.HmacSha256.init(ctx.cipher.suite.ecc.premaster);
+
+        var pre_left: [32]u8 = undefined;
+        var pre_right: [32]u8 = undefined;
+        Sha256.create(&pre_left, seed, &aes.material.premaster);
+        Sha256.create(&pre_right, &pre_left, &aes.material.premaster);
+        var left: [32]u8 = undefined;
+        var right: [32]u8 = undefined;
+        Sha256.create(&left, pre_left ++ seed, &aes.material.premaster);
+        Sha256.create(&right, pre_right ++ seed, &aes.material.premaster);
+
+        aes.material.master = left ++ right[0..16].*;
+
+        {
+            const key_seed = "key expansion" ++ ctx.cli_random.? ++ ctx.srv_random.?;
+            var first: [32]u8 = undefined;
+            Sha256.create(&first, key_seed, &aes.material.master);
+            var second: [32]u8 = undefined;
+            Sha256.create(&second, &first, &aes.material.master);
+            var third: [32]u8 = undefined;
+            Sha256.create(&third, &second, &aes.material.master);
+            var forth: [32]u8 = undefined;
+            Sha256.create(&forth, &third, &aes.material.master);
+            var fifth: [32]u8 = undefined;
+            Sha256.create(&fifth, &forth, &aes.material.master);
+
+            var p_first: [32]u8 = undefined;
+            Sha256.create(&p_first, first ++ key_seed, &aes.material.master);
+            var p_second: [32]u8 = undefined;
+            Sha256.create(&p_second, second ++ key_seed, &aes.material.master);
+            var p_third: [32]u8 = undefined;
+            Sha256.create(&p_third, third ++ key_seed, &aes.material.master);
+            var p_forth: [32]u8 = undefined;
+            Sha256.create(&p_forth, forth ++ key_seed, &aes.material.master);
+            var p_fifth: [32]u8 = undefined;
+            Sha256.create(&p_fifth, fifth ++ key_seed, &aes.material.master);
+            const final = p_first ++ p_second ++ p_third ++ p_forth ++ p_fifth;
+
+            aes.material.build(&final);
+        }
+        return aes.material;
+    }
+
+    fn unpackCBC(buffer: []const u8, ctx: *ConnCtx) !void {
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
+        //const name = try r.readInt(u16, .big);
+        //ctx.cipher.suite.aes.srv_dh = undefined;
+        const peer_key = &ctx.cipher.suite.aes.material.srv_pub_key;
+        try r.readNoEof(peer_key);
+
+        // TODO verify signature
+        ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
+    }
+
+    pub fn unpackKeyExchange(buffer: []const u8, ctx: *ConnCtx) !void {
+        if (ctx.cipher.suite != .aes) unreachable;
+        //var fba = fixedBufferStream(buffer);
+        //const r = fba.reader().any();
+
+        //const curve_type = try CurveType.fromByte(try r.readByte());
+        //switch (curve_type) {
+        //    .named_curve => try unpackNamed(buffer[1..], ctx),
+        //    else => return error.UnsupportedCurve,
+        //}
+        return unpackCBC(buffer, ctx);
+    }
+};
+
+pub const CBC = struct {
+    pub const key_length = 32;
+    pub const nonce_length = 0;
+};
+
+//pub const AESType = enum {
+//    AES_128_CBC_SHA,
+//};
+
+pub fn AES(comptime T: type) type {
+    return struct {
+        pub const Kind = T;
+        pub const key_length = T.key_length;
+        pub const nonce_length = T.nonce_length;
+    };
+}
 
 pub const EllipticCurve = struct {
     curve: Curves = .{ .invalid = {} },
@@ -178,7 +305,7 @@ pub const EllipticCurve = struct {
         const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
         material.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
 
-        const seed = "master secret" ++ ctx.our_random ++ ctx.peer_random.?;
+        const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
         //var left = std.crypto.auth.hmac.sha2.HmacSha256.init(ctx.cipher.suite.ecc.premaster);
 
         var pre_left: [32]u8 = undefined;
@@ -193,7 +320,7 @@ pub const EllipticCurve = struct {
         material.master = left ++ right[0..16].*;
 
         {
-            const key_seed = "key expansion" ++ ctx.peer_random.? ++ ctx.our_random;
+            const key_seed = "key expansion" ++ ctx.cli_random.? ++ ctx.srv_random.?;
             var first: [32]u8 = undefined;
             Sha256.create(&first, key_seed, &material.master);
             var second: [32]u8 = undefined;

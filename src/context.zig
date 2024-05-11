@@ -1,5 +1,6 @@
 // TODO refactor more
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const root = @import("root.zig");
 const Cipher = @import("cipher.zig");
@@ -14,8 +15,8 @@ const SessionID = root.SessionID;
 pub const ConnCtx = @This();
 
 cipher: Cipher = .{},
-our_random: [32]u8,
-peer_random: ?[32]u8 = null,
+cli_random: ?[32]u8 = null,
+srv_random: ?[32]u8 = null,
 session_id: ?SessionID = null,
 entity: ConnectionEnd = .{},
 prf_algorithm: PRFAlgorithm = .{},
@@ -25,13 +26,24 @@ compression_algorithm: CompressionMethod = null,
 // I hate this protocol
 handshake_record: std.ArrayList(u8),
 
-pub fn initClient(a: std.mem.Allocator) ConnCtx {
+pub fn initClient(a: Allocator) ConnCtx {
     var rand: [32]u8 = undefined;
     var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
     csprng.fill(&rand);
 
     return .{
-        .our_random = rand,
+        .cli_random = rand,
+        .handshake_record = std.ArrayList(u8).init(a),
+    };
+}
+
+pub fn initCrypto(a: Allocator) ConnCtx {
+    var rand: [32]u8 = undefined;
+    var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
+    csprng.fill(&rand);
+
+    return .{
+        .cli_random = rand,
         .handshake_record = std.ArrayList(u8).init(a),
     };
 }
