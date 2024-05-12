@@ -123,6 +123,7 @@ pub const ClientKeyExchange = struct {
     pub fn pack(cke: ClientKeyExchange, buffer: []u8) !usize {
         return switch (cke.cipher.suite) {
             .ecc => |ecc| ecc.packKeyExchange(buffer),
+            .aes => |aes| aes.packKeyExchange(buffer),
             else => return error.NotImplemented,
         };
     }
@@ -133,18 +134,25 @@ pub const Finished = struct {
         var fba = fixedBufferStream(buffer);
         var w = fba.writer().any();
 
-        var sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&ctx.cipher.suite.ecc.material.master);
+        const master = switch (ctx.cipher.suite) {
+            .ecc => |ecc| ecc.material.master,
+            .aes => |aes| aes.material.master,
+            else => unreachable,
+        };
+
+        var sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&master);
         sha.update("client finished");
         sha.update(ctx.handshake_record.items);
         var verify: [32]u8 = undefined;
         sha.final(&verify);
 
-        sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&ctx.cipher.suite.ecc.material.master);
+        sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&master);
         sha.update(&verify);
         sha.update("client finished");
         sha.update(ctx.handshake_record.items);
         sha.final(&verify);
 
+        // TODO do I need to zero this struct?
         defer ctx.handshake_record.deinit();
 
         try w.writeAll(&verify);
@@ -193,6 +201,7 @@ pub const ServerHello = struct {
             .TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
             .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
             .TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
             => {
                 ctx.cipher.suite = .{ .aes = undefined };
             },
@@ -229,7 +238,10 @@ pub const ServerKeyExchange = struct {
                 ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
                 try Cipher.EllipticCurve.unpackKeyExchange(buffer, ctx);
             },
-            .aes => try Cipher.AnyAES.unpackKeyExchange(buffer, ctx),
+            .aes => {
+                ctx.cipher.suite.aes.cli_dh = try Cipher.X25519.KeyPair.create(null);
+                try Cipher.AnyAES.unpackKeyExchange(buffer, ctx);
+            },
             else => unreachable,
         }
         return .{
@@ -380,21 +392,28 @@ pub const Handshake = struct {
 
         try w.writeByte(@intFromEnum(hs.msg_type));
         try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
+        if (hs.body == .client_hello)
+            try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
         return len + 4;
     }
 
-    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !Handshake {
+    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !Handshake {
         const hs_type = try Type.fromByte(buffer[0]);
-        const hsbuf = buffer[4..];
+        const len = std.mem.readInt(u24, buffer[1..4], .big);
+
+        // TODO choose real assert length
+        std.debug.assert(len < 1024);
+        try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
+        const hsbuf = buffer[4..][0..len];
         return .{
             .msg_type = hs_type,
             .body = switch (hs_type) {
-                .client_hello => .{ .client_hello = try ClientHello.unpack(hsbuf, sess) },
-                .server_hello => .{ .server_hello = try ServerHello.unpack(hsbuf, sess) },
-                .certificate => .{ .certificate = try Certificate.unpack(hsbuf, sess) },
-                .server_key_exchange => .{ .server_key_exchange = try ServerKeyExchange.unpack(hsbuf, sess) },
-                .certificate_request => .{ .certificate_request = try CertificateRequest.unpack(hsbuf, sess) },
-                .server_hello_done => .{ .server_hello_done = try ServerHelloDone.unpack(hsbuf, sess) },
+                .client_hello => .{ .client_hello = try ClientHello.unpack(hsbuf, ctx) },
+                .server_hello => .{ .server_hello = try ServerHello.unpack(hsbuf, ctx) },
+                .certificate => .{ .certificate = try Certificate.unpack(hsbuf, ctx) },
+                .server_key_exchange => .{ .server_key_exchange = try ServerKeyExchange.unpack(hsbuf, ctx) },
+                .certificate_request => .{ .certificate_request = try CertificateRequest.unpack(hsbuf, ctx) },
+                .server_hello_done => .{ .server_hello_done = try ServerHelloDone.unpack(hsbuf, ctx) },
                 else => unreachable,
             },
         };

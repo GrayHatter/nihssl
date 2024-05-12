@@ -1,5 +1,6 @@
 const std = @import("std");
 const ConnCtx = @import("context.zig");
+const Version = @import("protocol.zig");
 
 pub const X25519 = std.crypto.dh.X25519;
 
@@ -88,10 +89,13 @@ pub const Suites = enum(u16) {
     TLS_DH_anon_WITH_AES_256_CBC_SHA = 0x003A,
     TLS_DH_anon_WITH_AES_256_CBC_SHA256 = 0x006D,
     TLS_DH_anon_WITH_RC4_128_MD5 = 0x0018,
-    // Planned to implement
+
     TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAC,
     TLS_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAB,
     TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE,
+
+    /// TODO
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 = 0xC014,
 
     ///Current Supported
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
@@ -122,6 +126,14 @@ pub const Suites = enum(u16) {
 
 pub const AnyAES = struct {
     material: Material(AES(CBC), Sha256),
+
+    block: union(enum) {
+        cbc: CBC,
+    },
+
+    cli_dh: ?X25519.KeyPair = null,
+    srv_dh: ?X25519.KeyPair = null,
+
     /// srv is copied, and will not zero any arguments
     pub fn init(srv: [X25519.public_length]u8) !EllipticCurve {
         return .{
@@ -129,7 +141,65 @@ pub const AnyAES = struct {
         };
     }
 
-    fn packNamed(_: EllipticCurve, _: []u8) !usize {}
+    fn packEncryptedPremasterSecret(aes: AnyAES, buffer: []u8) !usize {
+        var l_buffer: [1024]u8 = undefined;
+        var fba = fixedBufferStream(l_buffer[0..]);
+        const w = fba.writer().any();
+
+        try w.writeByte(Version.Current.major);
+        try w.writeByte(Version.Current.minor);
+
+        const random: [46]u8 = [_]u8{0} ** 46;
+        try w.writeAll(&random);
+        switch (aes.block) {
+            .cbc => try CBC.decrypt(aes.material.cli_key, l_buffer[0..48], buffer),
+        }
+        return 48;
+    }
+
+    fn packClientECDHE(aes: AnyAES, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        const w = fba.writer().any();
+
+        try w.writeByte(@truncate(aes.cli_dh.?.public_key.len));
+        try w.writeAll(&aes.cli_dh.?.public_key);
+        return 1 + aes.cli_dh.?.public_key.len;
+    }
+
+    fn packClientDHE(aes: AnyAES, buffer: []u8) !usize {
+        var fba = fixedBufferStream(buffer);
+        const w = fba.writer().any();
+        try w.writeByte(1); // PublicValueEncoding.explicit
+        _ = aes;
+        // struct {
+        //     select (PublicValueEncoding) {
+        //         case implicit: struct { };
+        //         case explicit: opaque dh_Yc<1..2^16-1>;
+        //     } dh_public;
+        // } ClientDiffieHellmanPublic;
+
+        // dh_Yc
+        //    The client's Diffie-Hellman public value (Yc).
+        return 0;
+    }
+
+    /// TODO move this into the CBC struct
+    fn packCBC(aes: AnyAES, buffer: []u8) !usize {
+        //var fba = fixedBufferStream(buffer);
+        //const w = fba.writer().any();
+        return try aes.packClientECDHE(buffer);
+        //return try aes.packEncryptedPremasterSecret(buffer);
+        //w.writeAll(encrypted_premaster_secret);
+    }
+
+    pub fn packKeyExchange(aes: AnyAES, buffer: []u8) !usize {
+        return switch (aes.block) {
+            .cbc => aes.packCBC(buffer),
+            // LOL sorry future me!
+            //else => return error.NotImplemented,
+        };
+    }
+
     fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(CBC), Sha256) {
         var aes = &ctx.cipher.suite.aes;
 
@@ -193,16 +263,30 @@ pub const AnyAES = struct {
         ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
     }
 
+    fn unpackNamed(buffer: []const u8, ctx: *ConnCtx) !void {
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
+        const name = try r.readInt(u16, .big);
+        if (name != 0x001d) return error.UnknownCurveName;
+        ctx.cipher.suite.aes.srv_dh = undefined;
+        const peer_key = &ctx.cipher.suite.aes.srv_dh.?.public_key;
+        try r.readNoEof(peer_key);
+
+        // TODO verify signature
+
+        ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
+    }
+
     pub fn unpackKeyExchange(buffer: []const u8, ctx: *ConnCtx) !void {
         if (ctx.cipher.suite != .aes) unreachable;
-        //var fba = fixedBufferStream(buffer);
-        //const r = fba.reader().any();
+        var fba = fixedBufferStream(buffer);
+        const r = fba.reader().any();
 
-        //const curve_type = try CurveType.fromByte(try r.readByte());
-        //switch (curve_type) {
-        //    .named_curve => try unpackNamed(buffer[1..], ctx),
-        //    else => return error.UnsupportedCurve,
-        //}
+        const curve_type = try CurveType.fromByte(try r.readByte());
+        switch (curve_type) {
+            .named_curve => try unpackNamed(buffer[1..], ctx),
+            else => return error.UnsupportedCurve,
+        }
         return unpackCBC(buffer, ctx);
     }
 };
@@ -210,6 +294,27 @@ pub const AnyAES = struct {
 pub const CBC = struct {
     pub const key_length = 32;
     pub const nonce_length = 0;
+
+    pub fn decrypt(key: [32]u8, cipher: []const u8, clear: []u8) !void {
+        if (cipher.len % 16 != 0) return error.InvalidCipherLength;
+        if (clear.len < cipher.len) return error.InvalidClearLength;
+        var ctx = std.crypto.core.aes.Aes256.initDec(key);
+        const blocks = cipher.len / 16;
+        var i: usize = 0;
+        while (i < blocks) : (i += 1) {
+            ctx.decrypt(
+                clear[i * 16 ..][0..16],
+                cipher[i * 16 ..][0..16],
+            );
+        }
+    }
+
+    pub fn encrypt(key: []const u8, cipher: []const u8, clear: []u8) !void {
+        _ = key;
+        _ = clear;
+        _ = cipher;
+        comptime unreachable;
+    }
 };
 
 //pub const AESType = enum {
@@ -223,39 +328,38 @@ pub fn AES(comptime T: type) type {
         pub const nonce_length = T.nonce_length;
     };
 }
+pub const Curves = union(CurveType) {
+    invalid: void,
+    explicit_prime: ExplicitPrime,
+    explicit_char2: ExplicitChar2,
+    named_curve: NamedCurve,
+};
+
+pub const CurveType = enum(u8) {
+    invalid = 0,
+    explicit_prime = 1,
+    explicit_char2 = 2,
+    named_curve = 3,
+
+    pub fn fromByte(t: u8) !CurveType {
+        return switch (t) {
+            inline 0...3 => |i| @enumFromInt(i),
+            else => return error.InvalidECCCurveType,
+        };
+    }
+};
+
+pub const ExplicitPrime = struct {};
+pub const ExplicitChar2 = struct {};
+pub const NamedCurve = struct {};
 
 pub const EllipticCurve = struct {
     curve: Curves = .{ .invalid = {} },
 
-    srv_dh: ?X25519.KeyPair = undefined,
     cli_dh: ?X25519.KeyPair = null,
+    srv_dh: ?X25519.KeyPair = null,
 
     material: Material(ChaCha20, Sha256) = undefined,
-
-    pub const Curves = union(CurveType) {
-        invalid: void,
-        explicit_prime: ExplicitPrime,
-        explicit_char2: ExplicitChar2,
-        named_curve: NamedCurve,
-    };
-
-    pub const CurveType = enum(u8) {
-        invalid = 0,
-        explicit_prime = 1,
-        explicit_char2 = 2,
-        named_curve = 3,
-
-        pub fn fromByte(t: u8) !CurveType {
-            return switch (t) {
-                inline 0...3 => |i| @enumFromInt(i),
-                else => return error.InvalidECCCurveType,
-            };
-        }
-    };
-
-    pub const ExplicitPrime = struct {};
-    pub const ExplicitChar2 = struct {};
-    pub const NamedCurve = struct {};
 
     /// srv is copied, and will not zero any arguments
     pub fn init(srv: [X25519.public_length]u8) !EllipticCurve {

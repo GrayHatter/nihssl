@@ -12,3 +12,5 @@ pub const TLSv1_3: Version = .{
     .major = 3,
     .minor = 4,
 };
+
+pub const Current = TLSv1_2;
