@@ -140,23 +140,23 @@ pub const Finished = struct {
             else => unreachable,
         };
 
-        var sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&master);
+        var sha = std.crypto.auth.hmac.sha2.HmacSha384.init(&master);
         sha.update("client finished");
         sha.update(ctx.handshake_record.items);
-        var verify: [32]u8 = undefined;
+        var verify: [48]u8 = undefined;
         sha.final(&verify);
 
-        sha = std.crypto.auth.hmac.sha2.HmacSha256.init(&master);
-        sha.update(&verify);
-        sha.update("client finished");
-        sha.update(ctx.handshake_record.items);
-        sha.final(&verify);
+        //sha = std.crypto.auth.hmac.sha2.HmacSha384.init(&master);
+        //sha.update(&verify);
+        //sha.update("client finished");
+        //sha.update(ctx.handshake_record.items);
+        //sha.final(&verify);
 
         // TODO do I need to zero this struct?
         defer ctx.handshake_record.deinit();
 
         try w.writeAll(&verify);
-        return 0x20;
+        return 48;
     }
 };
 
@@ -196,13 +196,14 @@ pub const ServerHello = struct {
             => {
                 ctx.cipher.suite = .{ .ecc = undefined };
             },
-            .TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
-            .TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
-            .TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
-            .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
-            .TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            //.TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+            //.TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+            //.TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+            //.TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+            //.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
             .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
             => {
+                print("cipher requested = {}\n", .{cipher_request});
                 ctx.cipher.suite = .{ .aes = undefined };
             },
             //else => ctx.cipher.suite = .{ .ecc = undefined },

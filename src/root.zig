@@ -16,6 +16,8 @@ const ConnCtx = @import("context.zig");
 const Handshake = @import("handshake.zig");
 const Cipher = @import("cipher.zig");
 
+const PRINT_DEBUG = true;
+
 const ContentType = enum(u8) {
     change_cipher_spec = 20,
     alert = 21,
@@ -68,16 +70,19 @@ const TLSRecord = struct {
 
     pub fn encrypt(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
         var clear_buffer: [0x1000]u8 = undefined;
-        const len = try record.packFragment(&clear_buffer, ctx);
+        var len = try record.packFragment(&clear_buffer, ctx);
 
-        const empty: [0]u8 = undefined;
+        print("clear buffer {}\n", .{
+            std.fmt.fmtSliceHexLower(clear_buffer[0..len]),
+        });
         //print("material iv {any}\n", .{ctx.cipher.suite.ecc.material.cli_iv});
         //for (buffer[5..][0..12], ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, iv, seq|
         //    dst.* = iv ^ seq;
-        const encrypted_body = buffer[5..];
 
         switch (ctx.cipher.suite) {
             .ecc => {
+                const empty: [0]u8 = undefined;
+                const encrypted_body = buffer[5..];
                 std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
                     encrypted_body[0..len],
                     encrypted_body[len..][0..16],
@@ -87,7 +92,39 @@ const TLSRecord = struct {
                     ctx.cipher.suite.ecc.material.cli_key,
                 );
             },
-            .aes => |_| {},
+            .aes => |aes| {
+                var mac_buf: [0x200]u8 = undefined;
+                var fba = fixedBufferStream(&mac_buf);
+                var w = fba.writer().any();
+                try w.writeInt(u64, @truncate(ctx.cipher.sequence), .big);
+                try w.writeAll(clear_buffer[0..len]);
+
+                const mac_out: *[48]u8 = clear_buffer[len..][0..48];
+                std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_buf[0 .. 8 + len], &aes.material.cli_mac);
+                print("mac buf {any}\n", .{mac_buf[0 .. 8 + len]});
+                len += 48;
+
+                var aes_ctx = std.crypto.core.aes.Aes256.initEnc(aes.material.cli_key);
+                const add = 16 - (len % 16);
+                if (add != 0) {
+                    @memset(clear_buffer[len..][0..add], 0);
+                }
+                len += add;
+                @memcpy(buffer[5..][0..16], aes.material.cli_iv[0..]);
+                const encrypted_body = buffer[5..][16..];
+
+                var xord: [16]u8 = aes.material.cli_iv;
+                print("xor pre {any}\n", .{xord});
+                for (0..len / 16) |i| {
+                    var clear: [16]u8 = clear_buffer[i * 16 ..][0..16].*;
+                    const cipher: *[16]u8 = encrypted_body[i * 16 ..][0..16];
+                    for (clear[0..], xord[0..]) |*c, xr| c.* ^= xr;
+                    aes_ctx.encrypt(cipher, clear[0..]);
+                    @memcpy(xord[0..16], cipher[0..16]);
+                    print("{} {any}\n  {any}\n", .{ i, clear, cipher });
+                }
+                len += 16; // IV
+            },
             else => unreachable,
         }
 
@@ -226,7 +263,7 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
                 switch (hs.body) {
                     .server_hello => |hello| {
                         if (false) print("server hello {}\n", .{@TypeOf(hello)});
-                        if (false) print("srv selected suite {any}\n", .{ctx.cipher});
+                        if (true) print("srv selected suite {any}\n", .{ctx.cipher});
                         //if (ctx.cipher.suite != .ecc) {
                         //    return error.UnexpectedCipherSuite;
                         //}
@@ -289,7 +326,21 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
         },
     };
     const fin_len = try fin_record.encrypt(&buffer, ctx);
-    if (false) print("fin: {any}\n", .{buffer[0..fin_len]});
+    if (true) print("fin: {any}\n", .{
+        std.fmt.fmtSliceHexLower(buffer[0..fin_len]),
+    });
+    print("client key {}\n", .{
+        std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_key),
+    });
+    print("client mac {}\n", .{
+        std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_mac),
+    });
+    print("client iv {}\n", .{
+        std.fmt.fmtSliceHexLower(buffer[5..][0..16]),
+    });
+    print("client msg {}\n", .{
+        std.fmt.fmtSliceHexLower(buffer[5..][16..][0 .. fin_len - 5 - 16]),
+    });
     const finout = try conn.write(buffer[0..fin_len]);
     if (false) print("fin delivered, {}\n", .{finout});
 
@@ -364,7 +415,7 @@ test "probe" {
 }
 
 test "tls" {
-    if (false) return error.SkipZigTest;
+    if (true) return error.SkipZigTest;
     const addr = net.Address.resolveIp(TESTING_IP, TESTING_PORT) catch |err| {
         print("unable to resolve address because {}\n", .{err});
         return err;
@@ -386,7 +437,7 @@ test "cbc" {
     const conn = try net.tcpConnectToAddress(addr);
 
     var ctx = try startHandshakeCustomSuites(conn, &[_]Cipher.Suites{
-        .TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+        .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
     });
     errdefer ctx.handshake_record.deinit();
     var server: [0x1000]u8 = undefined;
@@ -517,4 +568,49 @@ test "mock server response" {
     //const len = try record.pack(&buffer);
     //try std.testing.expectEqual(43, len);
     //print("CKE: {any}\n", .{buffer[0..43]});
+}
+
+const test_key: [32]u8 = [_]u8{12} ** 32;
+const test_iv: [16]u8 = [_]u8{6} ** 16;
+
+test "aes" {
+    if (true) return error.SkipZigTest;
+    const clear: [16]u8 = "this is a test!!".*;
+
+    //print("test iv {any}\n", .{xord});
+    var cipher: [16]u8 = undefined;
+    var aes_ctx_en = std.crypto.core.aes.Aes256.initEnc(test_key);
+    var man_xor: [16]u8 = undefined;
+    for (man_xor[0..], clear[0..], test_iv[0..]) |*out, in, iv| {
+        out.* = in ^ iv;
+    }
+    aes_ctx_en.encrypt(cipher[0..], man_xor[0..]);
+    //@memcpy(&xord, cipher[0..]);
+    print("clear {} \n", .{
+        std.fmt.fmtSliceHexLower(clear[0..]),
+    });
+
+    print("man_xor {} \n", .{
+        std.fmt.fmtSliceHexLower(man_xor[0..]),
+    });
+
+    print("crypto {} \n", .{
+        std.fmt.fmtSliceHexLower(cipher[0..]),
+    });
+
+    const iv: [16]u8 = test_iv;
+    var xord: [16]u8 = undefined;
+    aes_ctx_en.xor(xord[0..], clear[0..], iv);
+    print("man_xor {} \n", .{
+        std.fmt.fmtSliceHexLower(xord[0..]),
+    });
+
+    var aes_ctx_de = std.crypto.core.aes.Aes256.initDec(test_key);
+    var output: [16]u8 = undefined;
+    aes_ctx_de.decrypt(output[0..], cipher[0..]);
+    print("crypto {s} {any}\n", .{ output, cipher });
+    for (output[0..], test_iv[0..]) |*out, iv2| {
+        out.* = out.* ^ iv2;
+    }
+    print("crypto {s} {any}\n", .{ output, cipher });
 }

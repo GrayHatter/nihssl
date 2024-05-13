@@ -23,7 +23,7 @@ suite: union(enum) {
     ecc: EllipticCurve,
     aes: AnyAES,
 } = .{ .invalid = {} },
-sequence: u72 = 0, // this is chacha20 specific :/
+sequence: u72 = 0, // u72 is chacha20 specific :/
 
 pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
     return struct {
@@ -219,7 +219,7 @@ pub const AnyAES = struct {
         Sha256.create(&left, pre_left ++ seed, &aes.material.premaster);
         Sha256.create(&right, pre_right ++ seed, &aes.material.premaster);
 
-        aes.material.master = left ++ right[0..16].*;
+        aes.material.master = (left ++ right[0..16].*);
 
         {
             const key_seed = "key expansion" ++ ctx.cli_random.? ++ ctx.srv_random.?;
@@ -293,7 +293,7 @@ pub const AnyAES = struct {
 
 pub const CBC = struct {
     pub const key_length = 32;
-    pub const nonce_length = 0;
+    pub const nonce_length = 16;
 
     pub fn decrypt(key: [32]u8, cipher: []const u8, clear: []u8) !void {
         if (cipher.len % 16 != 0) return error.InvalidCipherLength;
