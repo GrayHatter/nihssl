@@ -15,6 +15,7 @@ const hkdfExpandLabel = std.crypto.tls.hkdfExpandLabel;
 
 const ChaCha20 = ChaCha20Poly1305;
 const Sha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+const Sha384 = std.crypto.auth.hmac.sha2.HmacSha384;
 
 pub const Cipher = @This();
 
@@ -28,6 +29,11 @@ sequence: u72 = 0, // u72 is chacha20 specific :/
 pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
     return struct {
         pub const Self = @This();
+
+        pub const MacSize = hmac.mac_length;
+        pub const KeySize = enc.key_length;
+        pub const NonceSize = enc.nonce_length;
+        pub const PRF = Sha384;
 
         //cli_random: [32]u8 = undefined,
         //srv_random: [32]u8 = undefined,
@@ -56,6 +62,35 @@ pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
             self.cli_iv = key_material[index..][0..enc.nonce_length].*;
             index += enc.nonce_length;
             self.srv_iv = key_material[index..][0..enc.nonce_length].*;
+        }
+
+        pub fn keyExpansion(self: *Self, seed: [77]u8) void {
+            var a1: [MacSize]u8 = undefined;
+            var a2: [MacSize]u8 = undefined;
+            var a3: [MacSize]u8 = undefined;
+            var a4: [MacSize]u8 = undefined;
+            var a5: [MacSize]u8 = undefined;
+            PRF.create(&a1, &seed, &self.master);
+            PRF.create(&a2, &a1, &self.master);
+            PRF.create(&a3, &a2, &self.master);
+            PRF.create(&a4, &a3, &self.master);
+            PRF.create(&a5, &a4, &self.master);
+
+            var p1: [MacSize]u8 = undefined;
+            var p2: [MacSize]u8 = undefined;
+            var p3: [MacSize]u8 = undefined;
+            var p4: [MacSize]u8 = undefined;
+            var p5: [MacSize]u8 = undefined;
+
+            PRF.create(&p1, &a1 ++ seed, &self.master);
+            PRF.create(&p2, &a2 ++ seed, &self.master);
+            PRF.create(&p3, &a3 ++ seed, &self.master);
+            PRF.create(&p4, &a4 ++ seed, &self.master);
+            PRF.create(&p5, &a5 ++ seed, &self.master);
+
+            const final = p1 ++ p2 ++ p3 ++ p4 ++ p5;
+
+            self.build(&final);
         }
     };
 }
@@ -125,7 +160,7 @@ pub const Suites = enum(u16) {
 };
 
 pub const AnyAES = struct {
-    material: Material(AES(CBC), Sha256),
+    material: Material(AES(CBC), Sha384),
 
     block: union(enum) {
         cbc: CBC,
@@ -200,67 +235,39 @@ pub const AnyAES = struct {
         };
     }
 
-    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(CBC), Sha256) {
+    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(CBC), Sha384) {
         var aes = &ctx.cipher.suite.aes;
 
-        //const our_seckey = ctx.cipher.suite.aes.material.cli_dh.?.secret_key;
-        //const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
-        //material.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
+        const our_seckey = ctx.cipher.suite.aes.cli_dh.?.secret_key;
+        const peer_key = &ctx.cipher.suite.aes.srv_dh.?.public_key;
+        const premaster = try X25519.scalarmult(our_seckey, peer_key.*);
 
         const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
-        //var left = std.crypto.auth.hmac.sha2.HmacSha256.init(ctx.cipher.suite.ecc.premaster);
 
-        var pre_left: [32]u8 = undefined;
-        var pre_right: [32]u8 = undefined;
-        Sha256.create(&pre_left, seed, &aes.material.premaster);
-        Sha256.create(&pre_right, &pre_left, &aes.material.premaster);
-        var left: [32]u8 = undefined;
-        var right: [32]u8 = undefined;
-        Sha256.create(&left, pre_left ++ seed, &aes.material.premaster);
-        Sha256.create(&right, pre_right ++ seed, &aes.material.premaster);
+        const PRF = Sha384;
 
-        aes.material.master = (left ++ right[0..16].*);
+        var a1: [48]u8 = undefined;
+        PRF.create(&a1, seed, &premaster);
+        var p1: [48]u8 = undefined;
+        PRF.create(&p1, a1 ++ seed, &premaster);
 
-        {
-            const key_seed = "key expansion" ++ ctx.cli_random.? ++ ctx.srv_random.?;
-            var first: [32]u8 = undefined;
-            Sha256.create(&first, key_seed, &aes.material.master);
-            var second: [32]u8 = undefined;
-            Sha256.create(&second, &first, &aes.material.master);
-            var third: [32]u8 = undefined;
-            Sha256.create(&third, &second, &aes.material.master);
-            var forth: [32]u8 = undefined;
-            Sha256.create(&forth, &third, &aes.material.master);
-            var fifth: [32]u8 = undefined;
-            Sha256.create(&fifth, &forth, &aes.material.master);
+        aes.material.master = p1;
 
-            var p_first: [32]u8 = undefined;
-            Sha256.create(&p_first, first ++ key_seed, &aes.material.master);
-            var p_second: [32]u8 = undefined;
-            Sha256.create(&p_second, second ++ key_seed, &aes.material.master);
-            var p_third: [32]u8 = undefined;
-            Sha256.create(&p_third, third ++ key_seed, &aes.material.master);
-            var p_forth: [32]u8 = undefined;
-            Sha256.create(&p_forth, forth ++ key_seed, &aes.material.master);
-            var p_fifth: [32]u8 = undefined;
-            Sha256.create(&p_fifth, fifth ++ key_seed, &aes.material.master);
-            const final = p_first ++ p_second ++ p_third ++ p_forth ++ p_fifth;
-
-            aes.material.build(&final);
-        }
+        const key_seed = "key expansion" ++ ctx.srv_random.? ++ ctx.cli_random.?;
+        aes.material.keyExpansion(key_seed.*);
         return aes.material;
     }
 
-    fn unpackCBC(buffer: []const u8, ctx: *ConnCtx) !void {
-        var fba = fixedBufferStream(buffer);
-        const r = fba.reader().any();
-        //const name = try r.readInt(u16, .big);
-        //ctx.cipher.suite.aes.srv_dh = undefined;
-        const peer_key = &ctx.cipher.suite.aes.material.srv_pub_key;
-        try r.readNoEof(peer_key);
+    fn unpackCBC(_: []const u8, _: *ConnCtx) !void {
+        //var fba = fixedBufferStream(buffer);
+        //const r = fba.reader().any();
+        ////const name = try r.readInt(u16, .big);
+        ////ctx.cipher.suite.aes.srv_dh = undefined;
+        //const peer_key = &ctx.cipher.suite.aes.material.srv_pub_key;
+        //try r.readNoEof(peer_key);
 
-        // TODO verify signature
-        ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
+        //// TODO verify signature
+        //ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
     }
 
     fn unpackNamed(buffer: []const u8, ctx: *ConnCtx) !void {
@@ -268,9 +275,10 @@ pub const AnyAES = struct {
         const r = fba.reader().any();
         const name = try r.readInt(u16, .big);
         if (name != 0x001d) return error.UnknownCurveName;
+        const key_len = try r.readByte();
+        std.debug.assert(key_len == 32);
         ctx.cipher.suite.aes.srv_dh = undefined;
-        const peer_key = &ctx.cipher.suite.aes.srv_dh.?.public_key;
-        try r.readNoEof(peer_key);
+        try r.readNoEof(&ctx.cipher.suite.aes.srv_dh.?.public_key);
 
         // TODO verify signature
 
@@ -287,7 +295,7 @@ pub const AnyAES = struct {
             .named_curve => try unpackNamed(buffer[1..], ctx),
             else => return error.UnsupportedCurve,
         }
-        return unpackCBC(buffer, ctx);
+        //return unpackCBC(buffer, ctx);
     }
 };
 

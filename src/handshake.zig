@@ -226,7 +226,6 @@ pub const ServerHello = struct {
 
 pub const ServerKeyExchange = struct {
     buffer: []const u8,
-    cipher: *const Cipher,
 
     pub fn pack(_: ServerKeyExchange, _: []u8) !usize {
         return 0;
@@ -247,7 +246,6 @@ pub const ServerKeyExchange = struct {
         }
         return .{
             .buffer = buffer,
-            .cipher = &ctx.cipher,
         };
     }
 };
