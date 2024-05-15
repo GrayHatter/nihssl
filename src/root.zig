@@ -219,7 +219,6 @@ fn startHandshakeCustomSuites(conn: std.net.Stream, suites: []const Cipher.Suite
 
     const len = try record.pack(&buffer, &ctx);
     const dout = try conn.write(buffer[0..len]);
-    try ctx.handshake_record.appendSlice(buffer[5 .. len - 5]);
     if (false) print("data count {}\n", .{dout});
     if (false) print("data out {any}\n", .{buffer[0..len]});
     return ctx;
@@ -261,9 +260,6 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
                     .server_hello => |hello| {
                         if (false) print("server hello {}\n", .{@TypeOf(hello)});
                         if (false) print("srv selected suite {any}\n", .{ctx.cipher});
-                        //if (ctx.cipher.suite != .ecc) {
-                        //    return error.UnexpectedCipherSuite;
-                        //}
                     },
                     .certificate => |cert| {
                         if (false) print("server cert {}\n", .{@TypeOf(cert)});

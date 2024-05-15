@@ -150,16 +150,6 @@ pub const Finished = struct {
         var verified: [48]u8 = undefined;
         HmacSha384.create(&verified, a1 ++ seed, &master);
 
-        //sha = std.crypto.auth.hmac.sha2.HmacSha384.init(&master);
-        //sha.update(&verify);
-        //sha.update("client finished");
-        //sha.update(ctx.handshake_record.items);
-        //sha.final(&verify);
-
-        print("hash {}\n", .{
-            std.fmt.fmtSliceHexLower(&verified),
-        });
-
         try w.writeAll(verified[0..12]);
         return 12;
     }
@@ -208,7 +198,6 @@ pub const ServerHello = struct {
             //.TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
             .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
             => {
-                print("cipher requested = {}\n", .{cipher_request});
                 ctx.cipher.suite = .{ .aes = undefined };
             },
             //else => ctx.cipher.suite = .{ .ecc = undefined },
@@ -405,7 +394,6 @@ pub const Handshake = struct {
 
         // TODO choose real assert length
         std.debug.assert(len < 1024);
-        print("unpack append\n", .{});
         try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
         const hsbuf = buffer[4..][0..len];
         return .{
