@@ -207,7 +207,7 @@ pub const ServerHello = struct {
                 ctx.cipher.suite = .{ .aes = undefined };
             },
             //else => ctx.cipher.suite = .{ .ecc = undefined },
-            else => unreachable,
+            else => return error.UnsupportedSuite,
         }
 
         // compression

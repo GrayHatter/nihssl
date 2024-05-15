@@ -8,13 +8,13 @@ const asBytes = std.mem.asBytes;
 const TESTING_IP = "127.0.0.1";
 const TESTING_PORT = 4433;
 
-const Alert = @import("alert.zig");
+pub const Alert = @import("alert.zig");
 const Extensions = @import("extensions.zig");
 const Extension = Extensions.Extension;
-const Protocol = @import("protocol.zig");
-const ConnCtx = @import("context.zig");
-const Handshake = @import("handshake.zig");
-const Cipher = @import("cipher.zig");
+pub const Protocol = @import("protocol.zig");
+pub const ConnCtx = @import("context.zig");
+pub const Handshake = @import("handshake.zig");
+pub const Cipher = @import("cipher.zig");
 
 const PRINT_DEBUG = true;
 
@@ -35,7 +35,7 @@ const ContentType = enum(u8) {
     }
 };
 
-const TLSRecord = struct {
+pub const TLSRecord = struct {
     version: Protocol.Version = Protocol.TLSv1_2,
     length: u16 = 0,
     kind: union(ContentType) {
@@ -69,15 +69,16 @@ const TLSRecord = struct {
     }
 
     pub fn encrypt(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
-        var clear_buffer: [0x1000]u8 = undefined;
-        var len = try record.packFragment(&clear_buffer, ctx);
+        var fba = fixedBufferStream(buffer);
+        try fba.seekBy(5); // Record header
+        var w = fba.writer().any();
+
+        var clear_text: [0x1000]u8 = undefined;
+        var len = try record.packFragment(&clear_text, ctx);
 
         print("clear buffer {}\n", .{
-            std.fmt.fmtSliceHexLower(clear_buffer[0..len]),
+            std.fmt.fmtSliceHexLower(clear_text[0..len]),
         });
-        //print("material iv {any}\n", .{ctx.cipher.suite.ecc.material.cli_iv});
-        //for (buffer[5..][0..12], ctx.cipher.suite.ecc.material.cli_iv, asBytes(&ctx.cipher.sequence)[4..]) |*dst, iv, seq|
-        //    dst.* = iv ^ seq;
 
         switch (ctx.cipher.suite) {
             .ecc => {
@@ -86,53 +87,51 @@ const TLSRecord = struct {
                 std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
                     encrypted_body[0..len],
                     encrypted_body[len..][0..16],
-                    clear_buffer[0..len],
+                    clear_text[0..len],
                     &empty,
                     ctx.cipher.suite.ecc.material.cli_iv,
                     ctx.cipher.suite.ecc.material.cli_key,
                 );
             },
             .aes => |aes| {
-                var mac_buf: [0x200]u8 = undefined;
-                var fba = fixedBufferStream(&mac_buf);
-                var w = fba.writer().any();
-                try w.writeInt(u64, @truncate(ctx.cipher.sequence), .big);
-                try w.writeAll(clear_buffer[0..len]);
+                {
+                    var mac_buf: [0x200]u8 = undefined;
+                    var mac_fba = fixedBufferStream(&mac_buf);
+                    var mac_w = mac_fba.writer().any();
+                    try mac_w.writeInt(u64, @truncate(ctx.cipher.sequence), .big);
+                    try mac_w.writeAll(clear_text[0..len]);
 
-                const mac_out: *[48]u8 = clear_buffer[len..][0..48];
-                std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_buf[0 .. 8 + len], &aes.material.cli_mac);
-                print("mac buf {any}\n", .{mac_buf[0 .. 8 + len]});
-                len += 48;
+                    const mac_out: *[48]u8 = clear_text[len..][0..48];
+                    const mac_text = mac_buf[0 .. 8 + len];
+                    std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_text, &aes.material.cli_mac);
+                    print("mac buf {any}\n", .{mac_text});
+                    len += 48;
+                }
 
                 var aes_ctx = std.crypto.core.aes.Aes256.initEnc(aes.material.cli_key);
                 const add = 16 - (len % 16);
                 if (add != 0) {
-                    @memset(clear_buffer[len..][0..add], 0);
+                    @memset(clear_text[len..][0..add], 0);
                 }
                 len += add;
-                @memcpy(buffer[5..][0..16], aes.material.cli_iv[0..]);
-                const encrypted_body = buffer[5..][16..];
+                try w.writeAll(aes.material.cli_iv[0..]);
 
                 var xord: [16]u8 = aes.material.cli_iv;
                 print("xor pre {any}\n", .{xord});
                 for (0..len / 16) |i| {
-                    var clear: [16]u8 = clear_buffer[i * 16 ..][0..16].*;
-                    const cipher: *[16]u8 = encrypted_body[i * 16 ..][0..16];
+                    var clear: [16]u8 = clear_text[i * 16 ..][0..16].*;
+                    var cipher: [16]u8 = undefined;
                     for (clear[0..], xord[0..]) |*c, xr| c.* ^= xr;
-                    aes_ctx.encrypt(cipher, clear[0..]);
+                    aes_ctx.encrypt(cipher[0..], clear[0..]);
                     @memcpy(xord[0..16], cipher[0..16]);
                     print("{} {any}\n  {any}\n", .{ i, clear, cipher });
+                    try w.writeAll(cipher[0..]);
                 }
-                len += 16; // IV
             },
             else => unreachable,
         }
-
-        //print("biv {any}\n", .{buffer[5..][0..12]});
-        //print("encrypted {any}\n", .{encrypted_body[0..len]});
-        //print("tag {any}\n", .{encrypted_body[len .. len + 16]});
-
-        return try record.packHeader(buffer, len);
+        const enc_len = try fba.getPos();
+        return try record.packHeader(buffer, enc_len);
     }
 
     pub fn unpackFragment(buffer: []const u8, sess: *ConnCtx) !TLSRecord {
@@ -356,62 +355,6 @@ fn fullHandshake(conn: std.net.Stream) !void {
     const l = try readServer(conn, &server);
     try buildServer(server[0..l], &ctx);
     try completeClient(conn, &ctx);
-}
-
-fn probe(conn: std.net.Stream, target: Cipher.Suites) !void {
-    var buffer = [_]u8{0} ** 0x1000;
-    var ctx = ConnCtx.initClient(std.testing.allocator);
-    var client_hello = Handshake.ClientHello.init(ctx);
-    client_hello.ciphers = &[1]Cipher.Suites{target};
-    const record = TLSRecord{
-        .kind = .{
-            .handshake = try Handshake.Handshake.wrap(client_hello),
-        },
-    };
-
-    const len = try record.pack(&buffer, &ctx);
-    _ = try conn.write(buffer[0..len]);
-
-    var server: [0x1000]u8 = undefined;
-    const s_read = try conn.read(&server);
-    if (s_read == 0) return error.InvalidSHello;
-
-    const server_msg = server[0..s_read];
-    if (s_read <= 7) {
-        print("suite {} is unsupported\n", .{target});
-        return;
-    }
-    print("FOUND {}\n", .{target});
-
-    const tlsr = try TLSRecord.unpack(server_msg, &ctx);
-
-    switch (tlsr.kind) {
-        .change_cipher_spec, .alert, .application_data => return error.UnexpectedResponse,
-        .handshake => |hs| {
-            switch (hs.body) {
-                else => return,
-            }
-        },
-    }
-}
-
-test "probe" {
-    if (true) return error.SkipZigTest;
-    for (
-        [_][]const u8{ "127.0.0.1", "144.126.209.12" },
-        [_]u16{ 4433, 443 },
-    ) |IP, PORT| {
-        print("{s} :: {}\n", .{ IP, PORT });
-        for (std.meta.tags(Cipher.Suites)) |target| {
-            const addr = net.Address.resolveIp(IP, PORT) catch |err| {
-                print("unable to resolve address because {}\n", .{err});
-                return err;
-            };
-            const conn = try net.tcpConnectToAddress(addr);
-            defer conn.close();
-            try probe(conn, target);
-        }
-    }
 }
 
 test "tls" {

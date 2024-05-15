@@ -472,6 +472,8 @@ pub const EllipticCurve = struct {
         const r = fba.reader().any();
         const name = try r.readInt(u16, .big);
         if (name != 0x001d) return error.UnknownCurveName;
+        const key_len = try r.readByte();
+        std.debug.assert(key_len == 32);
         ctx.cipher.suite.ecc.srv_dh = undefined;
         const peer_key = &ctx.cipher.suite.ecc.srv_dh.?.public_key;
         try r.readNoEof(peer_key);
