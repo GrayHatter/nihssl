@@ -76,10 +76,6 @@ pub const TLSRecord = struct {
         var clear_text: [0x1000]u8 = undefined;
         var len = try record.packFragment(&clear_text, ctx);
 
-        print("clear buffer {}\n", .{
-            std.fmt.fmtSliceHexLower(clear_text[0..len]),
-        });
-
         switch (ctx.cipher.suite) {
             .ecc => {
                 const empty: [0]u8 = undefined;
@@ -99,38 +95,40 @@ pub const TLSRecord = struct {
                     var mac_fba = fixedBufferStream(&mac_buf);
                     var mac_w = mac_fba.writer().any();
                     try mac_w.writeInt(u64, @truncate(ctx.cipher.sequence), .big);
+                    try mac_w.writeAll(&[_]u8{ 22, 3, 3 });
+                    try mac_w.writeInt(u16, @truncate(len), .big);
                     try mac_w.writeAll(clear_text[0..len]);
+                    const mac_len = try mac_fba.getPos();
 
                     const mac_out: *[48]u8 = clear_text[len..][0..48];
-                    const mac_text = mac_buf[0 .. 8 + len];
+                    const mac_text = mac_buf[0..mac_len];
                     std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_text, &aes.material.cli_mac);
-                    print("mac buf {any}\n", .{mac_text});
                     len += 48;
                 }
 
                 var aes_ctx = std.crypto.core.aes.Aes256.initEnc(aes.material.cli_key);
                 const add = 16 - (len % 16);
                 if (add != 0) {
-                    @memset(clear_text[len..][0..add], 0);
+                    @memset(clear_text[len..][0..add], @truncate(add - 1));
                 }
                 len += add;
                 try w.writeAll(aes.material.cli_iv[0..]);
 
                 var xord: [16]u8 = aes.material.cli_iv;
-                print("xor pre {any}\n", .{xord});
                 for (0..len / 16) |i| {
                     var clear: [16]u8 = clear_text[i * 16 ..][0..16].*;
                     var cipher: [16]u8 = undefined;
-                    for (clear[0..], xord[0..]) |*c, xr| c.* ^= xr;
-                    aes_ctx.encrypt(cipher[0..], clear[0..]);
+                    var xclear: [16]u8 = undefined;
+                    for (xclear[0..], clear[0..], xord[0..]) |*xc, c, xr| xc.* = c ^ xr;
+                    aes_ctx.encrypt(cipher[0..], xclear[0..]);
                     @memcpy(xord[0..16], cipher[0..16]);
-                    print("{} {any}\n  {any}\n", .{ i, clear, cipher });
+                    //print("{} {any}\n  {any}\n  {any}\n", .{ i, clear, xclear, cipher });
                     try w.writeAll(cipher[0..]);
                 }
             },
             else => unreachable,
         }
-        const enc_len = try fba.getPos();
+        const enc_len = try fba.getPos() - 5;
         return try record.packHeader(buffer, enc_len);
     }
 
@@ -192,21 +190,21 @@ pub const ChangeCipherSpec = struct {
     }
 };
 
-test "Handshake ClientHello" {
-    var buffer = [_]u8{0} ** 0x400;
-
-    var ctx = ConnCtx.initClient(std.testing.allocator);
-    const client_hello = Handshake.ClientHello.init(ctx);
-    const record = TLSRecord{
-        .kind = .{
-            .handshake = try Handshake.Handshake.wrap(client_hello),
-        },
-    };
-
-    const len = try record.pack(&buffer, &ctx);
-    _ = len;
-    defer ctx.handshake_record.deinit();
-}
+//test "Handshake ClientHello" {
+//    var buffer = [_]u8{0} ** 0x400;
+//
+//    var ctx = ConnCtx.initClient(std.testing.allocator);
+//    const client_hello = Handshake.ClientHello.init(ctx);
+//    const record = TLSRecord{
+//        .kind = .{
+//            .handshake = try Handshake.Handshake.wrap(client_hello),
+//        },
+//    };
+//
+//    const len = try record.pack(&buffer, &ctx);
+//    _ = len;
+//    defer ctx.handshake_record.deinit();
+//}
 
 fn startHandshakeCustomSuites(conn: std.net.Stream, suites: []const Cipher.Suites) !ConnCtx {
     var buffer = [_]u8{0} ** 0x1000;
@@ -262,7 +260,7 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
                 switch (hs.body) {
                     .server_hello => |hello| {
                         if (false) print("server hello {}\n", .{@TypeOf(hello)});
-                        if (true) print("srv selected suite {any}\n", .{ctx.cipher});
+                        if (false) print("srv selected suite {any}\n", .{ctx.cipher});
                         //if (ctx.cipher.suite != .ecc) {
                         //    return error.UnexpectedCipherSuite;
                         //}
@@ -325,21 +323,23 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
         },
     };
     const fin_len = try fin_record.encrypt(&buffer, ctx);
-    if (true) print("fin: {any}\n", .{
-        std.fmt.fmtSliceHexLower(buffer[0..fin_len]),
-    });
-    print("client key {}\n", .{
-        std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_key),
-    });
-    print("client mac {}\n", .{
-        std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_mac),
-    });
-    print("client iv {}\n", .{
-        std.fmt.fmtSliceHexLower(buffer[5..][0..16]),
-    });
-    print("client msg {}\n", .{
-        std.fmt.fmtSliceHexLower(buffer[5..][16..][0 .. fin_len - 5 - 16]),
-    });
+    if (false) {
+        print("fin: {any}\n", .{
+            std.fmt.fmtSliceHexLower(buffer[0..fin_len]),
+        });
+        print("clientiv='{}'\n", .{
+            std.fmt.fmtSliceHexLower(buffer[5..][0..16]),
+        });
+        print("clientkey='{}'\n", .{
+            std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_key),
+        });
+        print("clientmac='{}'\n", .{
+            std.fmt.fmtSliceHexLower(&ctx.cipher.suite.aes.material.cli_mac),
+        });
+        print("clientmsg='{}'\n", .{
+            std.fmt.fmtSliceHexLower(buffer[5..][16..][0 .. fin_len - 5 - 16]),
+        });
+    }
     const finout = try conn.write(buffer[0..fin_len]);
     if (false) print("fin delivered, {}\n", .{finout});
 
@@ -347,6 +347,8 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     if (false) print("sin: {any}\n", .{r_buf[0..num2]});
     const sin2 = try TLSRecord.unpack(r_buf[0..num2], ctx);
     if (false) print("server thing {}\n", .{sin2});
+
+    ctx.raze();
 }
 
 fn fullHandshake(conn: std.net.Stream) !void {

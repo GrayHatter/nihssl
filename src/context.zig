@@ -51,3 +51,7 @@ pub fn initCrypto(a: Allocator) ConnCtx {
 pub fn initServer() ConnCtx {
     return .{};
 }
+
+pub fn raze(ctx: ConnCtx) void {
+    ctx.handshake_record.deinit();
+}

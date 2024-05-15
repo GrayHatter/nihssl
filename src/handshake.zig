@@ -30,6 +30,8 @@ const Extension = Extensions.Extension;
 const fixedBufferStream = std.io.fixedBufferStream;
 const print = std.debug.print;
 
+const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+
 var csprng = std.Random.ChaCha.init([_]u8{0} ** 32);
 
 pub const Compression = enum(u8) {
@@ -139,12 +141,14 @@ pub const Finished = struct {
             .aes => |aes| aes.material.master,
             else => unreachable,
         };
+        var hash: [48]u8 = undefined;
+        std.crypto.hash.sha2.Sha384.hash(ctx.handshake_record.items, hash[0..], .{});
 
-        var sha = std.crypto.auth.hmac.sha2.HmacSha384.init(&master);
-        sha.update("client finished");
-        sha.update(ctx.handshake_record.items);
-        var verify: [48]u8 = undefined;
-        sha.final(&verify);
+        const seed = "client finished" ++ hash;
+        var a1: [48]u8 = undefined;
+        HmacSha384.create(&a1, seed, &master);
+        var verified: [48]u8 = undefined;
+        HmacSha384.create(&verified, a1 ++ seed, &master);
 
         //sha = std.crypto.auth.hmac.sha2.HmacSha384.init(&master);
         //sha.update(&verify);
@@ -152,11 +156,12 @@ pub const Finished = struct {
         //sha.update(ctx.handshake_record.items);
         //sha.final(&verify);
 
-        // TODO do I need to zero this struct?
-        defer ctx.handshake_record.deinit();
+        print("hash {}\n", .{
+            std.fmt.fmtSliceHexLower(&verified),
+        });
 
-        try w.writeAll(&verify);
-        return 48;
+        try w.writeAll(verified[0..12]);
+        return 12;
     }
 };
 
@@ -235,11 +240,9 @@ pub const ServerKeyExchange = struct {
     pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !ServerKeyExchange {
         switch (ctx.cipher.suite) {
             .ecc => {
-                ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
                 try Cipher.EllipticCurve.unpackKeyExchange(buffer, ctx);
             },
             .aes => {
-                ctx.cipher.suite.aes.cli_dh = try Cipher.X25519.KeyPair.create(null);
                 try Cipher.AnyAES.unpackKeyExchange(buffer, ctx);
             },
             else => unreachable,
@@ -391,8 +394,8 @@ pub const Handshake = struct {
 
         try w.writeByte(@intFromEnum(hs.msg_type));
         try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
-        if (hs.body == .client_hello)
-            try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
+        print("pack append\n", .{});
+        try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
         return len + 4;
     }
 
@@ -402,6 +405,7 @@ pub const Handshake = struct {
 
         // TODO choose real assert length
         std.debug.assert(len < 1024);
+        print("unpack append\n", .{});
         try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
         const hsbuf = buffer[4..][0..len];
         return .{

@@ -130,7 +130,8 @@ pub const Suites = enum(u16) {
     TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE,
 
     /// TODO
-    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 = 0xC014,
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA = 0xC014,
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 = 0xC028,
 
     ///Current Supported
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA9,
@@ -245,7 +246,6 @@ pub const AnyAES = struct {
         const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
 
         const PRF = Sha384;
-
         var a1: [48]u8 = undefined;
         PRF.create(&a1, seed, &premaster);
         var p1: [48]u8 = undefined;
@@ -281,7 +281,7 @@ pub const AnyAES = struct {
         try r.readNoEof(&ctx.cipher.suite.aes.srv_dh.?.public_key);
 
         // TODO verify signature
-
+        ctx.cipher.suite.aes.cli_dh = try Cipher.X25519.KeyPair.create(null);
         ctx.cipher.suite.aes.material = try buildKeyMaterial(ctx);
     }
 
@@ -480,6 +480,7 @@ pub const EllipticCurve = struct {
 
         // TODO verify signature
 
+        ctx.cipher.suite.ecc.cli_dh = try Cipher.X25519.KeyPair.create(null);
         ctx.cipher.suite.ecc.material = try buildKeyMaterial(ctx);
     }
 
