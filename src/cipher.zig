@@ -26,13 +26,15 @@ suite: union(enum) {
 } = .{ .invalid = {} },
 sequence: u72 = 0, // u72 is chacha20 specific :/
 
-pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
+pub fn Material(comptime ENC: anytype, comptime HMAC: anytype) type {
     return struct {
         pub const Self = @This();
 
-        pub const MacSize = hmac.mac_length;
-        pub const KeySize = enc.key_length;
-        pub const NonceSize = enc.nonce_length;
+        pub const MacLength = HMAC.mac_length;
+        pub const KeyLength = ENC.key_length;
+        pub const NonceLength = ENC.nonce_length;
+        pub const BuildLength = 2 * (MacLength + KeyLength + NonceLength);
+
         pub const PRF = Sha384;
 
         //cli_random: [32]u8 = undefined,
@@ -42,45 +44,45 @@ pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
 
         premaster: [X25519.shared_length]u8 = [_]u8{0} ** X25519.shared_length,
         master: [48]u8 = undefined,
-        cli_mac: [hmac.mac_length]u8,
-        srv_mac: [hmac.mac_length]u8,
-        cli_key: [enc.key_length]u8,
-        srv_key: [enc.key_length]u8,
-        cli_iv: [enc.nonce_length]u8,
-        srv_iv: [enc.nonce_length]u8,
+        cli_mac: [MacLength]u8,
+        srv_mac: [MacLength]u8,
+        cli_key: [KeyLength]u8,
+        srv_key: [KeyLength]u8,
+        cli_iv: [NonceLength]u8,
+        srv_iv: [NonceLength]u8,
 
-        pub fn build(self: *Self, key_material: []const u8) void {
-            var index: usize = 0;
-            self.cli_mac = key_material[index..][0..hmac.mac_length].*;
-            index += hmac.mac_length;
-            self.srv_mac = key_material[index..][0..hmac.mac_length].*;
-            index += hmac.mac_length;
-            self.cli_key = key_material[index..][0..enc.key_length].*;
-            index += enc.key_length;
-            self.srv_key = key_material[index..][0..enc.key_length].*;
-            index += enc.key_length;
-            self.cli_iv = key_material[index..][0..enc.nonce_length].*;
-            index += enc.nonce_length;
-            self.srv_iv = key_material[index..][0..enc.nonce_length].*;
+        pub fn build(self: *Self, key_material: [BuildLength]u8) void {
+            var keym: []const u8 = key_material[0..];
+            self.cli_mac = keym[0..MacLength].*;
+            keym = keym[MacLength..];
+            self.srv_mac = keym[0..MacLength].*;
+            keym = keym[MacLength..];
+            self.cli_key = keym[0..KeyLength].*;
+            keym = keym[KeyLength..];
+            self.srv_key = keym[0..KeyLength].*;
+            keym = keym[KeyLength..];
+            self.cli_iv = keym[0..NonceLength].*;
+            keym = keym[NonceLength..];
+            self.srv_iv = keym[0..NonceLength].*;
         }
 
         pub fn keyExpansion(self: *Self, seed: [77]u8) void {
-            var a1: [MacSize]u8 = undefined;
-            var a2: [MacSize]u8 = undefined;
-            var a3: [MacSize]u8 = undefined;
-            var a4: [MacSize]u8 = undefined;
-            var a5: [MacSize]u8 = undefined;
+            var a1: [MacLength]u8 = undefined;
+            var a2: [MacLength]u8 = undefined;
+            var a3: [MacLength]u8 = undefined;
+            var a4: [MacLength]u8 = undefined;
+            var a5: [MacLength]u8 = undefined;
             PRF.create(&a1, &seed, &self.master);
             PRF.create(&a2, &a1, &self.master);
             PRF.create(&a3, &a2, &self.master);
             PRF.create(&a4, &a3, &self.master);
             PRF.create(&a5, &a4, &self.master);
 
-            var p1: [MacSize]u8 = undefined;
-            var p2: [MacSize]u8 = undefined;
-            var p3: [MacSize]u8 = undefined;
-            var p4: [MacSize]u8 = undefined;
-            var p5: [MacSize]u8 = undefined;
+            var p1: [MacLength]u8 = undefined;
+            var p2: [MacLength]u8 = undefined;
+            var p3: [MacLength]u8 = undefined;
+            var p4: [MacLength]u8 = undefined;
+            var p5: [MacLength]u8 = undefined;
 
             PRF.create(&p1, &a1 ++ seed, &self.master);
             PRF.create(&p2, &a2 ++ seed, &self.master);
@@ -88,9 +90,9 @@ pub fn Material(comptime enc: anytype, comptime hmac: anytype) type {
             PRF.create(&p4, &a4 ++ seed, &self.master);
             PRF.create(&p5, &a5 ++ seed, &self.master);
 
-            const final = p1 ++ p2 ++ p3 ++ p4 ++ p5;
+            const final: [BuildLength]u8 = (p1 ++ p2 ++ p3 ++ p4 ++ p5)[0..BuildLength].*;
 
-            self.build(&final);
+            self.build(final);
         }
     };
 }
@@ -161,7 +163,7 @@ pub const Suites = enum(u16) {
 };
 
 pub const AnyAES = struct {
-    material: Material(AES(CBC), Sha384),
+    material: Material(AES(256, CBC), Sha384),
 
     block: union(enum) {
         cbc: CBC,
@@ -236,7 +238,7 @@ pub const AnyAES = struct {
         };
     }
 
-    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(CBC), Sha384) {
+    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(256, CBC), Sha384) {
         var aes = &ctx.cipher.suite.aes;
 
         const our_seckey = ctx.cipher.suite.aes.cli_dh.?.secret_key;
@@ -329,11 +331,12 @@ pub const CBC = struct {
 //    AES_128_CBC_SHA,
 //};
 
-pub fn AES(comptime T: type) type {
+pub fn AES(comptime S: u16, comptime M: type) type {
     return struct {
-        pub const Kind = T;
-        pub const key_length = T.key_length;
-        pub const nonce_length = T.nonce_length;
+        pub const BIT_SIZE = S;
+        pub const MODE = M;
+        pub const key_length = M.key_length;
+        pub const nonce_length = M.nonce_length;
     };
 }
 pub const Curves = union(CurveType) {
@@ -418,7 +421,6 @@ pub const EllipticCurve = struct {
         material.premaster = try X25519.scalarmult(our_seckey, peer_key.*);
 
         const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
-        //var left = std.crypto.auth.hmac.sha2.HmacSha256.init(ctx.cipher.suite.ecc.premaster);
 
         var pre_left: [32]u8 = undefined;
         var pre_right: [32]u8 = undefined;
@@ -502,10 +504,6 @@ pub const Type = enum {
     block,
     aead,
 };
-
-const GenericStreamCipher = struct {};
-const GenericBlockCipher = struct {};
-const GenericAEADCipher = struct {};
 
 const ClientECDH = struct {
     _key_material: [255]u8 = [_]u8{8} ** 255,
