@@ -1,20 +1,3 @@
-///      RFC 5246
-///      ClientHello                  -------->
-///                                                      ServerHello
-///                                                     Certificate*
-///                                               ServerKeyExchange*
-///                                              CertificateRequest*
-///                                   <--------      ServerHelloDone
-///      Certificate*
-///      ClientKeyExchange
-///      CertificateVerify*
-///      [ChangeCipherSpec]
-///      Finished                     -------->
-///                                               [ChangeCipherSpec]
-///                                   <--------             Finished
-///      Application Data             <------->     Application Data
-///
-///
 const std = @import("std");
 
 const ConnCtx = @import("context.zig");
@@ -77,6 +60,7 @@ pub const ClientHello = struct {
         try w.writeByte(ch.version.major);
         try w.writeByte(ch.version.minor);
         try w.writeAll(&ch.random);
+        // FIXME
         try w.writeByte(0);
         //try w.writeByte(ch.session_id.len);
         //try w.writeAll(&ch.session_id);
@@ -181,8 +165,6 @@ pub const ServerHello = struct {
         try r.readNoEof(session_id[0..session_size]);
         // TODO verify session id matches
 
-        // cipers
-        //const cbytes: u16 = try r.readInt(u16, std.builtin.Endian.big);
         // FIXME
         const cipher_request = Cipher.Suites.fromInt(try r.readInt(u16, .big));
         switch (cipher_request) {
@@ -383,7 +365,6 @@ pub const Handshake = struct {
 
         try w.writeByte(@intFromEnum(hs.msg_type));
         try w.writeInt(u24, @truncate(len), std.builtin.Endian.big);
-        print("pack append\n", .{});
         try ctx.handshake_record.appendSlice(buffer[0 .. len + 4]);
         return len + 4;
     }

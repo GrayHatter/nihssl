@@ -9,8 +9,6 @@ const TESTING_IP = "127.0.0.1";
 const TESTING_PORT = 4433;
 
 pub const Alert = @import("alert.zig");
-const Extensions = @import("extensions.zig");
-const Extension = Extensions.Extension;
 pub const Protocol = @import("protocol.zig");
 pub const ConnCtx = @import("context.zig");
 pub const Handshake = @import("handshake.zig");
@@ -122,7 +120,6 @@ pub const TLSRecord = struct {
                     for (xclear[0..], clear[0..], xord[0..]) |*xc, c, xr| xc.* = c ^ xr;
                     aes_ctx.encrypt(cipher[0..], xclear[0..]);
                     @memcpy(xord[0..16], cipher[0..16]);
-                    //print("{} {any}\n  {any}\n  {any}\n", .{ i, clear, xclear, cipher });
                     try w.writeAll(cipher[0..]);
                 }
             },
@@ -150,7 +147,9 @@ pub const TLSRecord = struct {
             .version = version,
             .length = length,
             .kind = switch (fragtype) {
-                .change_cipher_spec => .{ .change_cipher_spec = if (fragbuff[0] != 1) return error.InvalidCCSPacket else {} },
+                .change_cipher_spec => .{
+                    .change_cipher_spec = if (fragbuff[0] != 1) return error.InvalidCCSPacket else {},
+                },
                 .alert => .{ .alert = try Alert.unpack(fragbuff) },
                 .handshake => .{ .handshake = try Handshake.Handshake.unpack(fragbuff, sess) },
                 .application_data => .{ .application_data = unreachable },
@@ -189,22 +188,6 @@ pub const ChangeCipherSpec = struct {
         return 1;
     }
 };
-
-//test "Handshake ClientHello" {
-//    var buffer = [_]u8{0} ** 0x400;
-//
-//    var ctx = ConnCtx.initClient(std.testing.allocator);
-//    const client_hello = Handshake.ClientHello.init(ctx);
-//    const record = TLSRecord{
-//        .kind = .{
-//            .handshake = try Handshake.Handshake.wrap(client_hello),
-//        },
-//    };
-//
-//    const len = try record.pack(&buffer, &ctx);
-//    _ = len;
-//    defer ctx.handshake_record.deinit();
-//}
 
 fn startHandshakeCustomSuites(conn: std.net.Stream, suites: []const Cipher.Suites) !ConnCtx {
     var buffer = [_]u8{0} ** 0x1000;
@@ -249,7 +232,6 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
     while (next_block.len > 0) {
         if (false) print("server block\n{any}\n", .{next_block});
         const tlsr = try TLSRecord.unpack(next_block, ctx);
-        if (false) print("mock {}\n", .{tlsr.length});
 
         next_block = next_block[tlsr.length + 5 ..];
 
@@ -291,7 +273,6 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     };
 
     const cke_len = try cke_record.pack(&buffer, ctx);
-    //try std.testing.expectEqual(42, cke_len);
     if (false) print("CKE: {any}\n", .{buffer[0..cke_len]});
     const ckeout = try conn.write(buffer[0..cke_len]);
     if (false) print("cke delivered, {}\n", .{ckeout});
@@ -312,7 +293,6 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     try std.testing.expectEqual(6, ccsout);
 
     const fin = Handshake.Finished{};
-    //const fin_len = try fin.pack(&buffer);
     const fin_record = TLSRecord{
         .kind = .{
             .handshake = try Handshake.Handshake.wrap(fin),
@@ -389,9 +369,8 @@ test "cbc" {
 }
 
 test "mock server response" {
-    if (true) return error.SkipZigTest;
-
-    var ctx = ConnCtx{};
+    var ctx = ConnCtx.initClient(std.testing.allocator);
+    defer ctx.handshake_record.deinit();
 
     // zig fmt: off
     const server_data = [_]u8{
@@ -497,28 +476,14 @@ test "mock server response" {
     // zig fmt: on
 
     try buildServer(&server_data, &ctx);
-
-    //const cke = try ClientKeyExchange.init();
-    //const record = TLSRecord{
-    //    .kind = .{
-    //        .handshake = try Handshake.wrap(cke),
-    //    },
-    //};
-
-    //var buffer = [_]u8{0} ** 0x1000;
-    //const len = try record.pack(&buffer);
-    //try std.testing.expectEqual(43, len);
-    //print("CKE: {any}\n", .{buffer[0..43]});
 }
 
 const test_key: [32]u8 = [_]u8{12} ** 32;
 const test_iv: [16]u8 = [_]u8{6} ** 16;
 
 test "aes" {
-    if (true) return error.SkipZigTest;
     const clear: [16]u8 = "this is a test!!".*;
 
-    //print("test iv {any}\n", .{xord});
     var cipher: [16]u8 = undefined;
     var aes_ctx_en = std.crypto.core.aes.Aes256.initEnc(test_key);
     var man_xor: [16]u8 = undefined;
@@ -526,32 +491,31 @@ test "aes" {
         out.* = in ^ iv;
     }
     aes_ctx_en.encrypt(cipher[0..], man_xor[0..]);
-    //@memcpy(&xord, cipher[0..]);
-    print("clear {} \n", .{
+    if (false) print("clear {} \n", .{
         std.fmt.fmtSliceHexLower(clear[0..]),
     });
 
-    print("man_xor {} \n", .{
+    if (false) print("man_xor {} \n", .{
         std.fmt.fmtSliceHexLower(man_xor[0..]),
     });
 
-    print("crypto {} \n", .{
+    if (false) print("crypto {} \n", .{
         std.fmt.fmtSliceHexLower(cipher[0..]),
     });
 
     const iv: [16]u8 = test_iv;
     var xord: [16]u8 = undefined;
     aes_ctx_en.xor(xord[0..], clear[0..], iv);
-    print("man_xor {} \n", .{
+    if (false) print("man_xor {} \n", .{
         std.fmt.fmtSliceHexLower(xord[0..]),
     });
 
     var aes_ctx_de = std.crypto.core.aes.Aes256.initDec(test_key);
     var output: [16]u8 = undefined;
     aes_ctx_de.decrypt(output[0..], cipher[0..]);
-    print("crypto {s} {any}\n", .{ output, cipher });
+    if (false) print("crypto {s} {any}\n", .{ output, cipher });
     for (output[0..], test_iv[0..]) |*out, iv2| {
         out.* = out.* ^ iv2;
     }
-    print("crypto {s} {any}\n", .{ output, cipher });
+    if (false) print("crypto {s} {any}\n", .{ output, cipher });
 }
