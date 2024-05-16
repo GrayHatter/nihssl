@@ -6,6 +6,7 @@ pub const X25519 = std.crypto.dh.X25519;
 
 const print = std.debug.print;
 const fixedBufferStream = std.io.fixedBufferStream;
+const nativeToBig = std.mem.nativeToBig;
 
 //const cipherT = std.crypto.tls.ApplicationCipherT;
 const hscipherT = std.crypto.tls.HandshakeCipherT;
@@ -16,7 +17,7 @@ const hkdfExpandLabel = std.crypto.tls.hkdfExpandLabel;
 const ChaCha20 = ChaCha20Poly1305;
 const Sha1 = std.crypto.auth.hmac.HmacSha1;
 const Sha256 = std.crypto.auth.hmac.sha2.HmacSha256;
-const Sha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
 
 pub const Cipher = @This();
 
@@ -48,18 +49,13 @@ pub fn encrypt(c: *Cipher, clear_text: []const u8, cipher_text: []u8) !usize {
         .aes => |aes| {
             var len: usize = clear_text.len;
             {
-                var mac_buf: [0x1000]u8 = undefined;
-                var mac_fba = fixedBufferStream(&mac_buf);
-                var mac_w = mac_fba.writer().any();
-                try mac_w.writeInt(u64, @truncate(c.sequence), .big);
-                try mac_w.writeAll(&[_]u8{ 22, 3, 3 });
-                try mac_w.writeInt(u16, @truncate(len), .big);
-                try mac_w.writeAll(clear_text);
-                const mac_len = try mac_fba.getPos();
-
                 const mac_out: *[48]u8 = l_clear[len..][0..48];
-                const mac_text = mac_buf[0..mac_len];
-                std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_text, &aes.material.cli_mac);
+                var mac = HmacSha384.init(&aes.material.cli_mac);
+                mac.update(std.mem.asBytes(&nativeToBig(u64, @truncate(c.sequence))));
+                mac.update(&[_]u8{ 22, 3, 3 });
+                mac.update(std.mem.asBytes(&nativeToBig(u16, @truncate(len))));
+                mac.update(clear_text);
+                mac.final(mac_out);
                 len += 48;
             }
 
@@ -117,7 +113,7 @@ pub fn Material(comptime ENC: anytype, comptime HMAC: anytype) type {
         pub const NonceLength = ENC.nonce_length;
         pub const BuildLength = 2 * (MacLength + KeyLength + NonceLength);
 
-        pub const PRF = Sha384;
+        pub const PRF = HmacSha384;
 
         srv_pub_key: [32]u8 = undefined,
 
@@ -242,7 +238,7 @@ pub const Suites = enum(u16) {
 
     pub fn toType(s: Suites) type {
         return switch (s) {
-            .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 => Material(AES(256, CBC), Sha384),
+            .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 => Material(AES(256, CBC), HmacSha384),
             .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA => Material(AES(256, CBC), Sha1),
             .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => Material(ECC, Sha256),
             .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => Material(ECC, Sha256),
@@ -252,7 +248,7 @@ pub const Suites = enum(u16) {
 };
 
 pub const AnyAES = struct {
-    material: Material(AES(256, CBC), Sha384),
+    material: Material(AES(256, CBC), HmacSha384),
 
     block: union(enum) {
         cbc: CBC,
@@ -327,7 +323,7 @@ pub const AnyAES = struct {
         };
     }
 
-    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(256, CBC), Sha384) {
+    fn buildKeyMaterial(ctx: *ConnCtx) !Material(AES(256, CBC), HmacSha384) {
         var aes = &ctx.cipher.suite.aes;
 
         const our_seckey = ctx.cipher.suite.aes.cli_dh.?.secret_key;
@@ -336,7 +332,7 @@ pub const AnyAES = struct {
 
         const seed = "master secret" ++ ctx.cli_random.? ++ ctx.srv_random.?;
 
-        const PRF = Sha384;
+        const PRF = HmacSha384;
         var a1: [48]u8 = undefined;
         PRF.create(&a1, seed, &premaster);
         var p1: [48]u8 = undefined;
