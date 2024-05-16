@@ -35,13 +35,14 @@ const ContentType = enum(u8) {
 
 pub const TLSRecord = struct {
     version: Protocol.Version = Protocol.TLSv1_2,
+    /// Length is the Header + Fragment.len
     length: u16 = 0,
     kind: union(ContentType) {
         change_cipher_spec: void, // This is const packet
         alert: Alert,
         handshake: Handshake.Handshake,
         application_data: []const u8,
-    },
+    } = undefined,
 
     pub fn packFragment(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
         return switch (record.kind) {
@@ -67,69 +68,19 @@ pub const TLSRecord = struct {
     }
 
     pub fn encrypt(record: TLSRecord, buffer: []u8, ctx: *ConnCtx) !usize {
-        var fba = fixedBufferStream(buffer);
-        try fba.seekBy(5); // Record header
-        var w = fba.writer().any();
+        var clear: [0x1000]u8 = undefined;
+        const len = try record.packFragment(&clear, ctx);
 
-        var clear_text: [0x1000]u8 = undefined;
-        var len = try record.packFragment(&clear_text, ctx);
-
-        switch (ctx.cipher.suite) {
-            .ecc => {
-                const empty: [0]u8 = undefined;
-                const encrypted_body = buffer[5..];
-                std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
-                    encrypted_body[0..len],
-                    encrypted_body[len..][0..16],
-                    clear_text[0..len],
-                    &empty,
-                    ctx.cipher.suite.ecc.material.cli_iv,
-                    ctx.cipher.suite.ecc.material.cli_key,
-                );
-            },
-            .aes => |aes| {
-                {
-                    var mac_buf: [0x200]u8 = undefined;
-                    var mac_fba = fixedBufferStream(&mac_buf);
-                    var mac_w = mac_fba.writer().any();
-                    try mac_w.writeInt(u64, @truncate(ctx.cipher.sequence), .big);
-                    try mac_w.writeAll(&[_]u8{ 22, 3, 3 });
-                    try mac_w.writeInt(u16, @truncate(len), .big);
-                    try mac_w.writeAll(clear_text[0..len]);
-                    const mac_len = try mac_fba.getPos();
-
-                    const mac_out: *[48]u8 = clear_text[len..][0..48];
-                    const mac_text = mac_buf[0..mac_len];
-                    std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_text, &aes.material.cli_mac);
-                    len += 48;
-                }
-
-                var aes_ctx = std.crypto.core.aes.Aes256.initEnc(aes.material.cli_key);
-                const add = 16 - (len % 16);
-                if (add != 0) {
-                    @memset(clear_text[len..][0..add], @truncate(add - 1));
-                }
-                len += add;
-                try w.writeAll(aes.material.cli_iv[0..]);
-
-                var xord: [16]u8 = aes.material.cli_iv;
-                for (0..len / 16) |i| {
-                    var clear: [16]u8 = clear_text[i * 16 ..][0..16].*;
-                    var cipher: [16]u8 = undefined;
-                    var xclear: [16]u8 = undefined;
-                    for (xclear[0..], clear[0..], xord[0..]) |*xc, c, xr| xc.* = c ^ xr;
-                    aes_ctx.encrypt(cipher[0..], xclear[0..]);
-                    @memcpy(xord[0..16], cipher[0..16]);
-                    try w.writeAll(cipher[0..]);
-                }
-            },
-            else => unreachable,
-        }
-        const enc_len = try fba.getPos() - 5;
+        const enc_len = try ctx.cipher.encrypt(clear[0..len], buffer[5..]);
         return try record.packHeader(buffer, enc_len);
     }
 
-    pub fn unpackFragment(buffer: []const u8, sess: *ConnCtx) !TLSRecord {
+    pub fn decryptFragment(cipher: []const u8, clear: []u8, ctx: *ConnCtx) ![]const u8 {
+        if (true) unreachable;
+        return try ctx.cipher.decrypt(cipher, clear);
+    }
+
+    pub fn unpackFragment(buffer: []const u8, ctx: *ConnCtx) !TLSRecord {
         var fba = fixedBufferStream(buffer);
         var r = fba.reader().any();
 
@@ -140,24 +91,31 @@ pub const TLSRecord = struct {
         };
         const length = try r.readInt(u16, std.builtin.Endian.big);
 
+        var decrypted: [0x1000]u8 = undefined;
         if (length > buffer[5..].len) return error.IncompleteFragment;
-        const fragbuff = buffer[5..][0..length];
+        const fragbuf: []const u8 = if (ctx.session_encrypted)
+            try decryptFragment(buffer[5..][0..length], decrypted[0..length], ctx)
+        else
+            buffer[5..][0..length];
 
         return .{
             .version = version,
-            .length = length,
+            .length = length + 5, // Record header size
             .kind = switch (fragtype) {
                 .change_cipher_spec => .{
-                    .change_cipher_spec = if (fragbuff[0] != 1) return error.InvalidCCSPacket else {},
+                    .change_cipher_spec = if (fragbuf[0] != 1) return error.InvalidCCSPacket else {},
                 },
-                .alert => .{ .alert = try Alert.unpack(fragbuff) },
-                .handshake => .{ .handshake = try Handshake.Handshake.unpack(fragbuff, sess) },
+                .alert => .{ .alert = try Alert.unpack(fragbuf) },
+                .handshake => .{
+                    .handshake = try Handshake.Handshake.unpack(fragbuf, ctx),
+                },
                 .application_data => .{ .application_data = unreachable },
             },
         };
     }
-    pub fn unpack(buffer: []const u8, sess: *ConnCtx) !TLSRecord {
-        return try unpackFragment(buffer, sess);
+
+    pub fn unpack(buffer: []const u8, ctx: *ConnCtx) !TLSRecord {
+        return try unpackFragment(buffer, ctx);
     }
 };
 
@@ -233,7 +191,7 @@ fn buildServer(data: []const u8, ctx: *ConnCtx) !void {
         if (false) print("server block\n{any}\n", .{next_block});
         const tlsr = try TLSRecord.unpack(next_block, ctx);
 
-        next_block = next_block[tlsr.length + 5 ..];
+        next_block = next_block[tlsr.length..];
 
         switch (tlsr.kind) {
             .change_cipher_spec, .alert, .application_data => return error.UnexpectedResponse,
@@ -322,7 +280,15 @@ fn completeClient(conn: std.net.Stream, ctx: *ConnCtx) !void {
     const num2 = try conn.read(&r_buf);
     if (false) print("sin: {any}\n", .{r_buf[0..num2]});
     const sin2 = try TLSRecord.unpack(r_buf[0..num2], ctx);
-    if (false) print("server thing {}\n", .{sin2});
+    if (true) print("server thing {}\n", .{sin2});
+
+    if (num2 > sin2.length) {
+        const n_buf = r_buf[sin2.length..];
+        const sin3 = try TLSRecord.unpack(n_buf, ctx);
+        if (true) print("server thing {}\n", .{sin3});
+    } else {
+        //const num3 = try conn.read(&r_buf);
+    }
 
     ctx.raze();
 }

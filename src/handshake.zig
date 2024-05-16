@@ -288,7 +288,7 @@ pub const Type = enum(u8) {
             15 => .certificate_verify,
             16 => .client_key_exchange,
             20 => .finished,
-            else => unreachable,
+            else => return error.InvalidHandshakeType,
         };
     }
 

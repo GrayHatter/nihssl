@@ -14,6 +14,7 @@ const chacha_t = hscipherT(ChaCha20Poly1305, std.crypto.hash.sha2.Sha256);
 const hkdfExpandLabel = std.crypto.tls.hkdfExpandLabel;
 
 const ChaCha20 = ChaCha20Poly1305;
+const Sha1 = std.crypto.auth.hmac.HmacSha1;
 const Sha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Sha384 = std.crypto.auth.hmac.sha2.HmacSha384;
 
@@ -24,7 +25,88 @@ suite: union(enum) {
     ecc: EllipticCurve,
     aes: AnyAES,
 } = .{ .invalid = {} },
+key_xhg: KeyExchange = .{},
 sequence: u72 = 0, // u72 is chacha20 specific :/
+
+pub fn encrypt(c: *Cipher, clear_text: []const u8, cipher_text: []u8) !usize {
+    var l_clear: [0x1000]u8 = undefined;
+    @memcpy(l_clear[0..clear_text.len], clear_text);
+    switch (c.suite) {
+        .ecc => {
+            const empty: [0]u8 = undefined;
+            const encrypted_body = cipher_text;
+            std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(
+                encrypted_body,
+                encrypted_body[0..16],
+                clear_text,
+                &empty,
+                c.suite.ecc.material.cli_iv,
+                c.suite.ecc.material.cli_key,
+            );
+            return error.NotImplemented;
+        },
+        .aes => |aes| {
+            var len: usize = clear_text.len;
+            {
+                var mac_buf: [0x1000]u8 = undefined;
+                var mac_fba = fixedBufferStream(&mac_buf);
+                var mac_w = mac_fba.writer().any();
+                try mac_w.writeInt(u64, @truncate(c.sequence), .big);
+                try mac_w.writeAll(&[_]u8{ 22, 3, 3 });
+                try mac_w.writeInt(u16, @truncate(len), .big);
+                try mac_w.writeAll(clear_text);
+                const mac_len = try mac_fba.getPos();
+
+                const mac_out: *[48]u8 = l_clear[len..][0..48];
+                const mac_text = mac_buf[0..mac_len];
+                std.crypto.auth.hmac.sha2.HmacSha384.create(mac_out, mac_text, &aes.material.cli_mac);
+                len += 48;
+            }
+
+            var aes_ctx = std.crypto.core.aes.Aes256.initEnc(aes.material.cli_key);
+            const add = 16 - (len % 16);
+            if (add != 0) {
+                @memset(l_clear[len..][0..add], @truncate(add - 1));
+            }
+            len += add;
+            if (cipher_text.len < len + aes.material.cli_iv.len)
+                return error.NoSpaceLeft;
+            var fba = fixedBufferStream(cipher_text);
+            var w = fba.writer().any();
+            try w.writeAll(aes.material.cli_iv[0..]);
+
+            var xord: [16]u8 = aes.material.cli_iv;
+            for (0..len / 16) |i| {
+                var clear: [16]u8 = l_clear[i * 16 ..][0..16].*;
+                var cipher: [16]u8 = undefined;
+                var xclear: [16]u8 = undefined;
+                for (xclear[0..], clear[0..], xord[0..]) |*xc, cl, xr| xc.* = cl ^ xr;
+                aes_ctx.encrypt(cipher[0..], xclear[0..]);
+                @memcpy(xord[0..16], cipher[0..16]);
+                try w.writeAll(cipher[0..]);
+            }
+            return try fba.getPos();
+        },
+        else => return error.SuiteNotImplmented,
+    }
+    comptime unreachable;
+}
+
+pub fn decrypt(c: *Cipher, cipher_text: []const u8, clear: []u8) ![]const u8 {
+    _ = cipher_text;
+    switch (c.suite) {
+        .ecc => |ecc| {
+            _ = ecc;
+        },
+        .aes => |aes| {
+            _ = aes;
+        },
+        else => unreachable,
+    }
+    return clear;
+}
+
+pub const KeyExchange = struct {};
 
 pub fn Material(comptime ENC: anytype, comptime HMAC: anytype) type {
     return struct {
@@ -36,9 +118,6 @@ pub fn Material(comptime ENC: anytype, comptime HMAC: anytype) type {
         pub const BuildLength = 2 * (MacLength + KeyLength + NonceLength);
 
         pub const PRF = Sha384;
-
-        //cli_random: [32]u8 = undefined,
-        //srv_random: [32]u8 = undefined,
 
         srv_pub_key: [32]u8 = undefined,
 
@@ -158,6 +237,16 @@ pub const Suites = enum(u16) {
             //0xCCAB => .TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
             //0xCCAE => .TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256,
             else => unreachable,
+        };
+    }
+
+    pub fn toType(s: Suites) type {
+        return switch (s) {
+            .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 => Material(AES(256, CBC), Sha384),
+            .TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA => Material(AES(256, CBC), Sha1),
+            .TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => Material(ECC, Sha256),
+            .TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => Material(ECC, Sha256),
+            else => comptime unreachable,
         };
     }
 };
@@ -363,6 +452,13 @@ pub const CurveType = enum(u8) {
 pub const ExplicitPrime = struct {};
 pub const ExplicitChar2 = struct {};
 pub const NamedCurve = struct {};
+
+pub const ECC = struct {
+    pub const BIT_SIZE = 265;
+    pub const MODE = ChaCha20;
+    pub const key_length = ChaCha20.key_length;
+    pub const nonce_length = ChaCha20.nonce_length;
+};
 
 pub const EllipticCurve = struct {
     curve: Curves = .{ .invalid = {} },

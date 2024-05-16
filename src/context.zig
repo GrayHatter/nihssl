@@ -14,6 +14,7 @@ const SessionID = root.SessionID;
 
 pub const ConnCtx = @This();
 
+session_encrypted: bool = false,
 cipher: Cipher = .{},
 cli_random: ?[32]u8 = null,
 srv_random: ?[32]u8 = null,
